@@ -555,11 +555,10 @@ release and keeps `v1`-named assets in step with the floating `v1` tag, so `@v1`
 gets the fast path on those platforms. The step's exit code is the verdict, so a
 failing scenario fails the job.
 
-> **Bootstrap note: pin `@main` (or a SHA) only for the very first release.** The
-> `v1` tag and its assets are created by the v1.1.0 release run; until that has
-> happened once, `uses: kexi/pitty@v1` cannot resolve the action ref. After the
-> first release, `@v1` is the recommended ref. See the release checklist in
-> [`COMPATIBILITY.md`](COMPATIBILITY.md).
+The action is published to the GitHub Marketplace as
+[**pitty-action**](https://github.com/marketplace/actions/pitty-action) (the
+bare name `pitty` is taken by an unrelated GitHub user; the Marketplace listing
+name does not affect how you reference it — always `uses: kexi/pitty@v1`).
 
 When pitty detects `GITHUB_ACTIONS=true` (or you pass `--github`) it emits two
 extra outputs alongside its normal stdout:

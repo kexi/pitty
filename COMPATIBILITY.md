@@ -60,27 +60,27 @@ parse the JSON, not the tables.
 
 As of v1.1, cutting a release is **automated** by
 [`.github/workflows/release.yml`](.github/workflows/release.yml): pushing a
-`v1.x.y` tag builds the four prebuilt binaries, uploads them with checksums,
-force-moves the floating `v1` tag to the release commit, and publishes a
-parallel `v1`-named asset set. The composite action's `version` input therefore
-defaults to `v1`.
+`v1.x.y` tag builds the three prebuilt binaries (Linux x86_64/aarch64, macOS
+arm64), uploads them with checksums, force-moves the floating `v1` tag to the
+release commit, and publishes a parallel `v1`-named asset set. The composite
+action's `version` input therefore defaults to `v1`.
 
-The **one-time bootstrap exception**: until the first release (v1.1.0) actually
-runs, the `v1` tag and assets do not exist, so `uses: kexi/pitty@v1` cannot
-resolve the action ref. Pin `kexi/pitty@main` (or a SHA) for that first
-release; `@v1` works for every release after.
+The first release (v1.1.0) has run, so the `v1` tag and assets exist and
+`uses: kexi/pitty@v1` resolves. (Historically, before that first release, `@v1`
+could not resolve and `@main`/a SHA was needed; that bootstrap window is closed.)
 
 When cutting a release:
 
 - [ ] Bump the crate `version` in `Cargo.toml`, refresh `Cargo.lock`, and add a
       `CHANGELOG.md` entry.
 - [ ] Push the release tag (e.g. `v1.1.0`). The release workflow then, on its
-      own: builds the four `OS × arch` binaries, uploads
-      `pitty-<tag>-<os>-<arch>.tar.gz` (+ `.sha256`) to the release,
+      own: creates the GitHub Release, builds the three `OS × arch` binaries,
+      uploads `pitty-<tag>-<os>-<arch>.tar.gz` (+ `.sha256`) to the release,
       force-moves the `v1` tag to the release commit, and publishes the
       `pitty-v1-<os>-<arch>.tar.gz` asset set to the `v1` release.
-- [ ] Verify the run is green and the eight assets (four per ref) are attached.
-      The asset names are machine-checked against `action.yml` by
+- [ ] Verify the run is green and the six assets (three per ref: Linux
+      x86_64/aarch64, macOS arm64) are attached. The asset names are
+      machine-checked against `action.yml` by
       `tests/release_asset_name_contract.rs`, but a real run also confirms the
       uploads and the tag move succeeded.
 - [ ] Post-push checks that the contract tests cannot cover statically (verify
@@ -90,7 +90,7 @@ When cutting a release:
         `chmod +x "$HOME/.local/bin/pitty"` resolves.
   - [ ] The Apple Silicon asset is named `...-Darwin-arm64.tar.gz` (raw
         `uname -m`), not `...-aarch64-...`.
-  - [ ] On the 2nd `v*` push (the `v1` force-move), all three jobs skip
+  - [ ] On the 2nd `v*` push (the `v1` force-move), all four jobs skip
         (dotless `v1` fails the `contains('.')` guard) — no duplicate upload.
   - [ ] A consumer run's "Install pitty" log shows the prebuilt fast path
         (`Installing prebuilt pitty from ...` + `Verified sha256 of ...`),
@@ -101,7 +101,10 @@ When cutting a release:
 The composite action's Marketplace **metadata** (`name`, `description`,
 `branding.icon`/`color`) is machine-checked on every CI run by
 [`tests/marketplace_action_contract.rs`](tests/marketplace_action_contract.rs),
-so the listing can never drift out of a publishable shape.
+so the listing can never drift out of a publishable shape. The listing `name` is
+`pitty-action`: Marketplace names must be globally unique and the bare `pitty`
+collides with the github.com/pitty user. This is only the listing name — the
+repo and `uses: kexi/pitty@v1` are unaffected.
 
 The **publish step itself cannot be automated** — GitHub exposes no API for it
 and requires accepting the Marketplace Developer Agreement in the web UI. It is
