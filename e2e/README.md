@@ -16,6 +16,10 @@ directory. This is the end-to-end surface that used to live in `tests/e2e.rs`.
 
   `scenarios/meta/inner/` holds the inner scenarios; they are not meant to be
   run on their own as part of the dogfood pass (they fail by design).
+- **`scenarios/windows/`** — Windows-only smoke coverage. The `test-windows`
+  CI job runs this tier natively on `windows-latest` to prove `cmd.exe` can be
+  spawned through ConPTY, receive CR-terminated input, emit output, and report
+  exit status.
 
 ## Required environment variables
 

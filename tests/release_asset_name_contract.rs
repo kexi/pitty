@@ -2,23 +2,24 @@
 //! workflow must match exactly what the composite action downloads.
 //!
 //! `action.yml` fast-path builds its download URL from
-//!   pitty-${PITTY_REF}-$(uname -s)-$(uname -m).tar.gz
+//!   pitty-${PITTY_REF}-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz
 //! and `.github/workflows/release.yml` names each archive
 //!   pitty-<ref>-${{ matrix.os_name }}-${{ matrix.arch_name }}.tar.gz
-//! where `os_name`/`arch_name` are the raw `uname` values supplied per build
-//! matrix entry. If the two drift — most easily by the release matrix naming
-//! Apple Silicon `aarch64` (its Rust triple) instead of `arm64` (its
-//! `uname -m`) — the action's fast path 404s and silently falls back to a slow
-//! `cargo install`, with nothing failing loudly. This test pins both sides to
-//! one source of truth (the four `(os, arch)` uname pairs) so that drift fails
-//! at `cargo test` time, in the same spirit as `schema_contract.rs`.
+//! where `os_name`/`arch_name` are GitHub's runner OS/arch labels supplied per
+//! build matrix entry. If the two drift — most easily by the release matrix
+//! naming Apple Silicon `aarch64` (its Rust triple) instead of `ARM64`, or
+//! Windows by a Git-Bash `uname` string instead of `Windows` — the action's fast
+//! path 404s and silently falls back to a slow `cargo install`, with nothing
+//! failing loudly. This test pins both sides to one source of truth (the
+//! `(RUNNER_OS, RUNNER_ARCH)` pairs) so that drift fails at `cargo test` time, in
+//! the same spirit as `schema_contract.rs`.
 //!
 //! The check is structural rather than a single literal-name match because
 //! release.yml composes each name from a templated `archive:` line plus the
 //! per-target `os_name`/`arch_name` matrix values. We verify (a) the action's
 //! download expression has the shape this test reproduces, (b) the release
 //! archive template concatenates ref, os_name, and arch_name in that order, and
-//! (c) every uname pair appears as a matrix entry feeding that template.
+//! (c) every runner OS/arch pair appears as a matrix entry feeding that template.
 //!
 //! Both files are embedded with `include_str!` so the test reads the exact
 //! bytes that ship.
@@ -28,46 +29,90 @@ const ACTION_YML: &str = include_str!("../action.yml");
 /// The release workflow source, embedded so the test reads what ships.
 const RELEASE_YML: &str = include_str!("../.github/workflows/release.yml");
 
-/// The `(uname -s, uname -m)` pairs pitty ships prebuilt binaries for.
+/// The `(RUNNER_OS, RUNNER_ARCH)` pairs pitty ships prebuilt binaries for.
 /// This is the single source of truth both sides are checked against.
 ///
-/// Apple Silicon is `arm64` here (its `uname -m`), deliberately distinct from
-/// the `aarch64` Rust triple, because the action keys on `uname` output.
+/// Apple Silicon is `("macOS", "ARM64")` here, deliberately distinct from the
+/// `aarch64-apple-darwin` Rust triple, because the action keys on GitHub's
+/// runner labels. Windows is `("Windows", "X64")`, not a Git-Bash `uname`
+/// string, because `uname -s` includes the host kernel version on Windows.
 ///
-/// No `("Darwin", "x86_64")`: GitHub's macos-13 Intel runners were unreliably
+/// No `("macOS", "X64")`: GitHub's macos-13 Intel runners were unreliably
 /// scheduled and blocked releases, so Intel Macs fall back to `cargo install` in
 /// the composite action. Add the pair back here and in release.yml's matrix if a
 /// dependable Intel runner returns.
-const UNAME_PAIRS: &[(&str, &str)] = &[
-    ("Linux", "x86_64"),
-    ("Linux", "aarch64"),
-    ("Darwin", "arm64"),
+const RUNNER_PAIRS: &[(&str, &str)] = &[
+    ("Linux", "X64"),
+    ("Linux", "ARM64"),
+    ("macOS", "ARM64"),
+    ("Windows", "X64"),
 ];
 
 #[test]
-fn action_builds_asset_name_from_raw_uname_values() {
+fn action_builds_asset_name_from_runner_labels() {
     // Pin the shape of action.yml's download expression: this whole gate only
-    // proves a match if the action really concatenates ref, `uname -s`, and
-    // `uname -m` in that order with `.tar.gz`. A change to the expression must
-    // update this assertion (and UNAME_PAIRS).
+    // proves a match if the action really concatenates ref, RUNNER_OS, and
+    // RUNNER_ARCH in that order with `.tar.gz`. A change to the expression must
+    // update this assertion (and RUNNER_PAIRS).
     assert!(
-        ACTION_YML.contains(r#"os="$(uname -s)""#),
-        "action.yml must derive os from `uname -s`"
+        ACTION_YML.contains(r#"os="${RUNNER_OS:?RUNNER_OS is not set}""#),
+        "action.yml must derive os from RUNNER_OS"
     );
     assert!(
-        ACTION_YML.contains(r#"arch="$(uname -m)""#),
-        "action.yml must derive arch from `uname -m`"
+        ACTION_YML.contains(r#"arch="${RUNNER_ARCH:?RUNNER_ARCH is not set}""#),
+        "action.yml must derive arch from RUNNER_ARCH"
     );
     assert!(
         ACTION_YML.contains(r#"asset="pitty-${PITTY_REF}-${os}-${arch}.tar.gz""#),
-        "action.yml asset name expression changed; update UNAME_PAIRS / this gate"
+        "action.yml asset name expression changed; update RUNNER_PAIRS / this gate"
+    );
+}
+
+#[test]
+fn action_handles_windows_executable_name_inside_tarball() {
+    // Windows release archives contain `pitty.exe`, while Unix archives contain
+    // `pitty`. The action must chmod the OS-specific extracted filename before
+    // adding the install dir to PATH, otherwise a Windows prebuilt install would
+    // download and extract successfully but fail on the final chmod. It must
+    // also write a Windows-native PATH entry to GITHUB_PATH: the extraction
+    // command runs under Git Bash, but the runner owns PATH propagation between
+    // composite steps. The fallback install must do the same for Cargo's bin
+    // directory so source installs work on runners that did not already expose
+    // it.
+    assert!(
+        ACTION_YML.contains(r#"bin_name="pitty""#),
+        "action.yml must default the extracted binary name to pitty"
+    );
+    assert!(
+        ACTION_YML.contains(r#"if [ "$os" = "Windows" ]; then"#),
+        "action.yml must branch on Windows before chmod"
+    );
+    assert!(
+        ACTION_YML.contains(r#"bin_name="pitty.exe""#),
+        "action.yml must chmod pitty.exe for Windows prebuilt installs"
+    );
+    assert!(
+        ACTION_YML.contains(r#"chmod +x "$install_dir/$bin_name""#),
+        "action.yml must chmod the OS-specific extracted binary name"
+    );
+    assert!(
+        ACTION_YML.contains(r#"path_entry="$(cygpath -w "$dir")""#),
+        "action.yml must write Windows-native entries to GITHUB_PATH"
+    );
+    assert!(
+        ACTION_YML.contains(r#"append_github_path "$install_dir""#),
+        "action.yml must add the prebuilt install dir to GITHUB_PATH"
+    );
+    assert!(
+        ACTION_YML.contains(r#"append_github_path "${CARGO_HOME:-$HOME/.cargo}/bin""#),
+        "action.yml must add Cargo's fallback install dir to GITHUB_PATH"
     );
 }
 
 #[test]
 fn release_archive_template_orders_ref_os_arch_to_match_the_action() {
     // The release archive name must be `pitty-<ref>-<os>-<arch>` with os/arch
-    // taken from the matrix's raw uname values, in the same order the action's
+    // taken from the matrix's runner labels, in the same order the action's
     // download URL uses. We check both refs the workflow publishes: the pushed
     // tag (`github.ref_name`, e.g. v1.1.0) and the floating `v1`. A reordered or
     // renamed segment here is the exact drift that silently breaks the fast path.
@@ -86,10 +131,10 @@ fn release_archive_template_orders_ref_os_arch_to_match_the_action() {
 }
 
 #[test]
-fn release_matrix_covers_exactly_the_uname_pairs() {
-    // Every uname pair the action can download must appear as a build matrix
+fn release_matrix_covers_exactly_the_runner_pairs() {
+    // Every runner OS/arch pair the action can download must appear as a build matrix
     // entry (os_name + arch_name on adjacent lines), so the templated archive
-    // name above expands to exactly the four names the action expects — no
+    // name above expands to exactly the names the action expects — no
     // missing target (a platform that always falls back to cargo) and no stray
     // target naming an asset the action will never request. There are two
     // matrix blocks (release-tag and v1); each pair must appear in both, so we
@@ -106,29 +151,29 @@ fn release_matrix_covers_exactly_the_uname_pairs() {
             .filter(|w| w[0] == os_line && w[1] == arch_line)
             .count()
     };
-    for (os, arch) in UNAME_PAIRS {
+    for (os, arch) in RUNNER_PAIRS {
         let occurrences = count_pair(os, arch);
         assert!(
             occurrences >= 2,
-            "release.yml matrix must list uname pair ({os}, {arch}) in both the \
+            "release.yml matrix must list runner pair ({os}, {arch}) in both the \
              release-tag and v1 matrices (found {occurrences} occurrence(s))"
         );
     }
 
     // Guard against an extra target the action could not serve: count total
-    // matrix entries and require exactly 2 * UNAME_PAIRS (two matrix blocks).
+    // matrix entries and require exactly 2 * RUNNER_PAIRS (two matrix blocks).
     let total_entries = trimmed_lines
         .iter()
         .filter(|l| l.starts_with("arch_name: "))
         .count();
     assert_eq!(
         total_entries,
-        2 * UNAME_PAIRS.len(),
+        2 * RUNNER_PAIRS.len(),
         "release.yml has {total_entries} matrix arch_name entries; expected exactly \
-         {} (two matrix blocks of the {} uname pairs). An extra/missing target drifts \
+         {} (two matrix blocks of the {} runner pairs). An extra/missing target drifts \
          from the action's download set.",
-        2 * UNAME_PAIRS.len(),
-        UNAME_PAIRS.len(),
+        2 * RUNNER_PAIRS.len(),
+        RUNNER_PAIRS.len(),
     );
 }
 
@@ -157,8 +202,8 @@ fn release_only_triggers_on_tag_push() {
 #[test]
 fn release_pins_leading_dir_false_on_both_upload_steps() {
     // AC6: action.yml extracts the tarball with `tar -xzf -C $HOME/.local/bin`
-    // and then `chmod +x "$HOME/.local/bin/pitty"`, i.e. it expects the binary
-    // at the tarball ROOT (no `pitty-.../` subdirectory). That holds only if
+    // and then chmods `pitty`/`pitty.exe`, i.e. it expects the binary at the
+    // tarball ROOT (no `pitty-.../` subdirectory). That holds only if
     // upload-rust-binary-action is told `leading-dir: false`. The action's
     // default is not guaranteed across versions, so release.yml must state it
     // explicitly on BOTH upload steps (release-tag and v1). If the default ever
@@ -174,24 +219,26 @@ fn release_pins_leading_dir_false_on_both_upload_steps() {
         occurrences, 2,
         "release.yml must pin `leading-dir: false` on both the release-tag and v1 \
          upload steps (found {occurrences}); the action expects the binary at the \
-         tarball root for `chmod +x $HOME/.local/bin/pitty`"
+         tarball root for chmod"
     );
 }
 
 #[test]
-fn release_bin_name_matches_action_chmod_target() {
-    // Binary-name drift guard: release.yml builds `bin: pitty`, and action.yml
-    // makes the extracted binary executable at `$HOME/.local/bin/pitty`. With
-    // `leading-dir: false` the tarball root file is named after `bin`, so if the
-    // crate's binary is ever renamed in release.yml, action.yml's chmod path
-    // would no longer exist. Pin both to the literal `pitty`.
+fn release_bin_name_matches_action_chmod_targets() {
+    // Binary-name drift guard: release.yml builds `bin: pitty`, while action.yml
+    // makes the extracted binary executable as `pitty` on Unix and `pitty.exe`
+    // on Windows. With `leading-dir: false` the tarball root file is named after
+    // `bin` plus the platform executable suffix, so if the crate's binary is
+    // ever renamed in release.yml, action.yml's chmod path would no longer exist.
     assert!(
         RELEASE_YML.contains("bin: pitty"),
         "release.yml must build `bin: pitty` (binary name the action chmods)"
     );
     assert!(
-        ACTION_YML.contains(r#"chmod +x "$HOME/.local/bin/pitty""#),
-        "action.yml must chmod `$HOME/.local/bin/pitty`, matching release.yml `bin: pitty`"
+        ACTION_YML.contains(r#"bin_name="pitty""#)
+            && ACTION_YML.contains(r#"bin_name="pitty.exe""#)
+            && ACTION_YML.contains(r#"chmod +x "$install_dir/$bin_name""#),
+        "action.yml must chmod pitty/pitty.exe, matching release.yml `bin: pitty`"
     );
 }
 

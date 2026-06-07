@@ -1,0 +1,12 @@
+version: 3
+files:
+  - pattern: .github/workflows/*.yml
+  - pattern: .github/workflows/*.yaml
+  - pattern: action.yml
+  - pattern: action.yaml
+ignore_actions:
+  # dtolnay/rust-toolchain has no semver tag for pinact to verify. Keep the
+  # action code manually SHA-pinned and pass `toolchain: stable` explicitly
+  # instead of using the mutable `@stable` ref.
+  - name: dtolnay/rust-toolchain
+    ref: 3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9

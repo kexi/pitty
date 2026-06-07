@@ -84,7 +84,7 @@ env:
   NODE_ENV: test                  # injected into every spawned process
 workspace:
   cwd: .                          # run dir, relative to the scenario file
-  temp: true                      # OR run in a fresh 0700 temp dir (overrides cwd)
+  temp: true                      # OR run in a fresh temp dir (0700 on Unix)
 steps:
   - spawn: bash                                   # or {command, cwd, env}
   - send: echo ${username}                        # stdin line; \r (CR) appended; ${var} expanded
@@ -535,8 +535,8 @@ duration_ms: min 1180  median 1340  mean 1402  p95 1980  max 2100  stddev 240
 - **`--warmup` may exceed `--runs`.** Warmups are simply discarded first, so
   `--runs 1 --warmup 3` runs four times and reports the single measured run.
 - **Each run gets a fresh workspace.** With `workspace.temp: true`, every run is
-  given its own `0700` temp directory, so a file one run writes is never visible
-  to the next — runs do not share state.
+  given its own temp directory (`0700` on Unix), so a file one run writes is
+  never visible to the next — runs do not share state.
 - **Snapshots are never recorded or updated by `bench`** (no `--update` flag):
   re-recording across N runs would just keep whichever run wrote last, so an
   absent snapshot fails. Record once with `pitty run --update` first.
@@ -563,10 +563,10 @@ the GitHub Release matching the runner's OS/arch (fast: a tarball download, no
 compilation), and falls back to `cargo install --git` from source when no
 prebuilt asset exists for that platform. The release automation
 ([`.github/workflows/release.yml`](.github/workflows/release.yml)) publishes
-prebuilt binaries for Linux (x86_64, aarch64) and macOS (arm64) on every
-release and keeps `v1`-named assets in step with the floating `v1` tag, so `@v1`
-gets the fast path on those platforms. The step's exit code is the verdict, so a
-failing scenario fails the job.
+prebuilt binaries for Linux (X64, ARM64), macOS (ARM64), and Windows (X64) on
+every release and keeps `v1`-named assets in step with the floating `v1` tag, so
+`@v1` gets the fast path on those platforms. The step's exit code is the verdict,
+so a failing scenario fails the job.
 
 The action is published to the GitHub Marketplace as
 [**pitty-action**](https://github.com/marketplace/actions/pitty-action) (the
@@ -609,8 +609,9 @@ most severe outcome: process (3) > scenario (2) > assertion (1) > success (0).
 ## Logs
 
 Each run writes `logs/<scenario>.log` containing the captured terminal output
-and per-step results. Log files are created with `0600` permissions, and
-registered secret values are replaced with `***` before anything is written.
+and per-step results. Log files are created with `0600` permissions on Unix
+(Windows uses the runner user's default file ACLs), and registered secret values
+are replaced with `***` before anything is written.
 
 ## Security and trust model
 
@@ -622,8 +623,9 @@ registered secret values are replaced with `***` before anything is written.
 Minimal guards (in place since v0.1):
 
 - **Temp/log permissions.** `workspace.temp: true` uses `tempfile::TempDir`
-  (atomic `mkdtemp`, no self-chosen names) set to `0700`. Logs are `0600`.
-  These are Unix-only modes; `pitty` targets Unix PTYs.
+  (atomic temp-directory creation, no self-chosen names). On Unix, temp
+  workspaces are set to `0700` and logs to `0600`; on Windows, pitty relies on
+  the runner user's default ACLs.
 - **Secret masking.** Variables flagged `secret: true` have their literal
   value masked (`***`) in logs and error messages.
 - **Best-effort cleanup.** Temp directories are removed when their `TempDir`

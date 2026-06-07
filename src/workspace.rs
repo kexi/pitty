@@ -2,9 +2,10 @@
 //! secret masking registration.
 //!
 //! A workspace either runs in an existing directory (relative to the scenario
-//! file) or in a fresh `0700` temp directory. It resolves the scenario's
-//! variables and environment, knows how to expand `${var}` placeholders in
-//! step payloads, and registers secret values so logs and errors can mask them.
+//! file) or in a fresh temp directory (`0700` on Unix). It resolves the
+//! scenario's variables and environment, knows how to expand `${var}`
+//! placeholders in step payloads, and registers secret values so logs and
+//! errors can mask them.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -41,11 +42,11 @@ impl Workspace {
     /// Prepare a workspace from a scenario, resolving paths against
     /// `base_dir` (the directory containing the scenario file).
     ///
-    /// When `workspace.temp` is set, a `0700` temp directory is created via
-    /// `tempfile::TempDir`. We use `mkdtemp`-backed `TempDir` rather than
-    /// constructing our own predictable name: self-named temp dirs are prone
-    /// to races and symlink attacks, whereas `TempDir` creates the directory
-    /// atomically with a random name.
+    /// When `workspace.temp` is set, a temp directory is created via
+    /// `tempfile::TempDir` (`0700` on Unix). We use `mkdtemp`-backed `TempDir`
+    /// rather than constructing our own predictable name: self-named temp dirs
+    /// are prone to races and symlink attacks, whereas `TempDir` creates the
+    /// directory atomically with a random name.
     pub fn prepare(scenario: &Scenario, base_dir: &Path) -> Result<Self, PittyError> {
         let mut secrets = Vec::new();
         let mut variables = BTreeMap::new();
@@ -228,8 +229,7 @@ fn set_permissions_0700(path: &Path) -> Result<(), PittyError> {
         .map_err(|e| PittyError::Process(format!("failed to set temp dir mode: {e}")))
 }
 
-/// No-op on non-Unix. pitty targets Unix PTYs, but keep this compiling
-/// portably so a non-Unix build fails on PTY use, not on permissions.
+/// No-op on non-Unix: those platforms use their default temp directory ACLs.
 #[cfg(not(unix))]
 fn set_permissions_0700(_path: &Path) -> Result<(), PittyError> {
     Ok(())
@@ -582,5 +582,28 @@ steps: []
             .resolve_write_path("out/escape.snap")
             .expect_err("symlink escape must be rejected");
         assert_eq!(err.exit_code(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lexical_normalize_preserves_windows_drive_prefix() {
+        // Windows drive prefixes must survive lexical normalization; otherwise
+        // snapshot-write containment would compare a malformed candidate/root
+        // pair and reject a legitimate in-workspace path.
+        let normalized = lexical_normalize(Path::new(r"C:\work\pitty\..\snapshots\out.snap"));
+        assert_eq!(normalized, PathBuf::from(r"C:\work\snapshots\out.snap"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lexical_normalize_preserves_windows_unc_prefix() {
+        // UNC prefixes carry the server/share root. Dropping them would make a
+        // network workspace look like a local absolute path during containment.
+        let normalized =
+            lexical_normalize(Path::new(r"\\server\share\pitty\..\snapshots\out.snap"));
+        assert_eq!(
+            normalized,
+            PathBuf::from(r"\\server\share\snapshots\out.snap")
+        );
     }
 }

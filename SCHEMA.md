@@ -73,7 +73,7 @@ Values are `${var}`-expanded.
 | Key    | Type    | Default | Meaning |
 |--------|---------|---------|---------|
 | `cwd`  | string  | `"."`   | Working directory, relative to the scenario file's directory. Ignored when `temp` is true. |
-| `temp` | boolean | `false` | Run inside a fresh `0700` temp directory, removed when the run ends. |
+| `temp` | boolean | `false` | Run inside a fresh temp directory, removed when the run ends (`0700` on Unix). |
 
 ### `matrix`
 

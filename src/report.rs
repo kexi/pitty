@@ -1,8 +1,8 @@
 //! Run reports (serialize-only) and scenario log writing.
 //!
 //! A [`Report`] summarizes one scenario run for JSON output. Logs are written
-//! to `logs/<scenario>.log` with `0600` permissions, and every byte that
-//! touches the log file is run through secret masking first.
+//! to `logs/<scenario>.log` (`0600` on Unix), and every byte that touches the
+//! log file is run through secret masking first.
 
 use std::io::Write;
 use std::path::Path;
@@ -94,7 +94,7 @@ impl Report {
 }
 
 /// Write the captured terminal output and assertion results to
-/// `logs/<scenario>.log`, masking secrets, with `0600` permissions.
+/// `logs/<scenario>.log`, masking secrets (`0600` on Unix).
 ///
 /// The log directory is created relative to `base_dir`. Failures here are
 /// non-fatal to the run's pass/fail verdict, so callers may log-and-continue;

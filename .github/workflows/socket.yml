@@ -6,10 +6,11 @@
 # missing API key degrades supply-chain scanning without taking down the main
 # CI gate (ci.yml).
 #
-# Why SHA-pinned actions here (unlike ci.yml's major tags): this workflow is the
-# one place a repository secret (SOCKET_SECURITY_API_KEY) is in scope, so we pin
-# every action to an immutable commit SHA — a compromised mutable tag here would
-# run attacker code with the secret available. Bump the SHAs deliberately.
+# Why SHA-pinned actions here: this workflow is the one place a repository
+# secret (SOCKET_SECURITY_API_KEY) is in scope, so every action must stay pinned
+# to an immutable commit SHA — a compromised mutable tag here would run attacker
+# code with the secret available. `ci.yml` gates the SHA pins and version
+# comments with pinact.
 #
 # API key: add SOCKET_SECURITY_API_KEY as a repo (or org) Actions secret. Create
 # one at https://docs.socket.dev/docs/create-socket-api-key-for-cicd.

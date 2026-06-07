@@ -9,18 +9,19 @@
 # why there is deliberately no `pull_request`/`pull_request_target` trigger.
 #
 # Asset-name contract (the load-bearing detail): action.yml downloads
-#   pitty-${ref}-$(uname -s)-$(uname -m).tar.gz
-# so the archive names produced here MUST use the raw `uname` os/arch values, not
-# the Rust target triple. In particular Apple Silicon is `arm64` from `uname -m`
-# even though we build the `aarch64-apple-darwin` triple — the archive is named
-# `...-Darwin-arm64.tar.gz`, NOT `...-aarch64-...`. A mismatch makes the action's
+#   pitty-${ref}-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz
+# so the archive names produced here MUST use GitHub's runner OS/arch labels,
+# not `uname` values or Rust target triples. In particular Apple Silicon is
+# `macOS-ARM64` (RUNNER_OS/RUNNER_ARCH), even though we build the
+# `aarch64-apple-darwin` triple; Windows x64 is `Windows-X64`, even though the
+# executable inside the archive is `pitty.exe`. A mismatch makes the action's
 # fast path 404 and silently fall back to a slow `cargo install`, so the
 # `release_asset_name_contract.rs` test pins both sides to one source of truth.
 #
 # Action pinning: every action is pinned to an immutable commit SHA (with a
-# version comment), stricter than ci.yml's major-tag pinning, because this is a
-# workflow where a write-scoped GITHUB_TOKEN is in scope — a compromised mutable
-# tag here could publish tampered release assets. Bump the SHAs deliberately.
+# version comment), and ci.yml gates those pins/comments with pinact. This
+# workflow has a write-scoped GITHUB_TOKEN in scope, so a compromised mutable tag
+# here could publish tampered release assets. Bump the SHAs deliberately.
 name: Release
 
 on:
@@ -85,46 +86,52 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64: uname -s = Linux, uname -m = x86_64. Native build.
+          # Linux x64: RUNNER_OS = Linux, RUNNER_ARCH = X64. Native build.
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             os_name: Linux
-            arch_name: x86_64
-          # Linux aarch64: uname -m = aarch64 on a Linux ARM host. Cross-built
-          # from an x86_64 runner via upload-rust-binary-action's
-          # `build-tool: cross` (which invokes the `cross` tool under the hood;
-          # no separate cross action is used).
+            arch_name: X64
+          # Linux ARM64: RUNNER_ARCH = ARM64 on a Linux ARM host. Cross-built
+          # from an x64 runner via upload-rust-binary-action's `build-tool:
+          # cross` (which invokes the `cross` tool under the hood; no separate
+          # cross action is used).
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
             os_name: Linux
-            arch_name: aarch64
-          # Apple Silicon: uname -m = arm64 (NOT aarch64), even though the Rust
-          # triple is aarch64-apple-darwin. The archive must be named `arm64` to
-          # match what action.yml's `uname -m` produces on Apple Silicon runners.
+            arch_name: ARM64
+          # Apple Silicon: RUNNER_OS = macOS, RUNNER_ARCH = ARM64, even though
+          # the Rust triple is aarch64-apple-darwin. The archive must be named
+          # with runner labels to match action.yml.
           #
           # No macOS Intel (x86_64-apple-darwin) target: GitHub's macos-13 Intel
           # runners are unreliably scheduled (queued indefinitely), which blocked
           # the whole release. Intel Macs fall back to `cargo install` in the
           # composite action instead. Re-add a `- target: x86_64-apple-darwin`
-          # entry (and the UNAME_PAIRS row in the contract test) if a dependable
+          # entry (and the RUNNER_PAIRS row in the contract test) if a dependable
           # Intel runner returns.
           - target: aarch64-apple-darwin
             runner: macos-14
-            os_name: Darwin
-            arch_name: arm64
+            os_name: macOS
+            arch_name: ARM64
+          # Windows x64: the archive is still `.tar.gz` for one action-side
+          # extraction path; the binary inside is `pitty.exe`.
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            os_name: Windows
+            arch_name: X64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       # Publish the asset under the pushed tag (e.g. v1.1.0). `archive` is a
-      # literal name embedding the raw uname os/arch (not $target) so it matches
-      # action.yml's download URL exactly; `leading-dir: false` places the
-      # `pitty` binary at the tarball root so the action's
-      # `tar -xzf -C $HOME/.local/bin` yields `$HOME/.local/bin/pitty`.
+      # literal name embedding the GitHub runner OS/arch labels (not $target) so
+      # it matches action.yml's download URL exactly; `leading-dir: false` places
+      # the binary at the tarball root so the action's `tar -xzf -C
+      # $HOME/.local/bin` yields `$HOME/.local/bin/pitty` or `pitty.exe`.
       # Why not rely on the action default: a future upload-rust-binary-action
       # release could flip the default to a leading `pitty-.../` directory,
-      # which would make action.yml's `chmod +x "$HOME/.local/bin/pitty"` hit
-      # "No such file"; pinning it here fixes the tarball layout regardless.
+      # which would make action.yml's chmod target hit "No such file"; pinning
+      # it here fixes the tarball layout regardless.
       - name: Upload assets for the release tag
         uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
@@ -197,7 +204,7 @@ jobs:
             --title "$major" \
             --notes "Floating major release. Tracks the latest ${major}.x.y; assets mirror the latest tagged release."
 
-  # Build the same four targets again, but attach the archives to the `v1`
+  # Build the same targets again, but attach the archives to the `v1`
   # release under `v1`-named files. A separate matrix job (rather than reusing
   # upload-assets) because `ref` must point at `v1`, which only exists after
   # move-v1-tag has run.
@@ -212,23 +219,27 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             os_name: Linux
-            arch_name: x86_64
+            arch_name: X64
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
             os_name: Linux
-            arch_name: aarch64
+            arch_name: ARM64
           # No macOS Intel target — see the upload-assets matrix for why.
           - target: aarch64-apple-darwin
             runner: macos-14
-            os_name: Darwin
-            arch_name: arm64
+            os_name: macOS
+            arch_name: ARM64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            os_name: Windows
+            arch_name: X64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       # `ref: refs/tags/v1` attaches these assets to the `v1` release and sets
       # the `$tag` template variable to `v1`; the literal `archive` name encodes
-      # `v1` plus the raw uname os/arch, matching the action's default
+      # `v1` plus the runner OS/arch labels, matching the action's default
       # `version: v1` download URL. `leading-dir: false` keeps the binary at the
       # tarball root (see the release-tag step for why this is pinned, not left
       # to the action default).

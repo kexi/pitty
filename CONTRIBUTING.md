@@ -22,7 +22,9 @@ runner. Run `just` (no args) to list recipes:
 | --- | --- |
 | `just build` / `just build-release` | compile (debug / release) |
 | `just test` / `just test-pty` | tests (excluding / including the PTY-gated `#[ignore]` tests) |
-| `just lint` / `just fmt` | `cargo fmt --check` + `clippy -D warnings` / auto-format |
+| `just check-windows` | type-check all targets for `x86_64-pc-windows-msvc` |
+| `just lint` / `just fmt` | `pinact` verify + `cargo fmt --check` + `clippy -D warnings` / auto-format |
+| `just pinact-verify` | verify GitHub Actions SHA pins and version comments |
 | `just run <path>` / `just matrix <file>` / `just bench <file> [runs]` | drive pitty |
 | `just dogfood` | run all three dogfood tiers (see below) |
 | `just vibe-e2e [vibe_bin]` | E2E the external `vibe` CLI (see [`examples/vibe`](examples/vibe)) |
@@ -85,18 +87,18 @@ Two scanners guard the repository:
   scans the dependency manifest (`Cargo.toml`) for malicious or risky crates. It
   needs a `SOCKET_SECURITY_API_KEY` repository (or org) Actions secret; without
   it the scan step is skipped (so pull requests from forks, which cannot see the
-  secret, do not fail). Its actions are pinned to commit SHAs because this is a
-  workflow where a secret is in scope.
+  secret, do not fail). Workflow actions are pinned to commit SHAs and checked
+  by `pinact` in CI.
 
 ## Releasing
 
 Cutting a release is automated by
 [`.github/workflows/release.yml`](.github/workflows/release.yml): pushing a
-`v1.x.y` tag creates the GitHub Release, builds the three prebuilt binaries
-(Linux x86_64/aarch64, macOS arm64), uploads them with checksums, force-moves the
-floating `v1` tag to the release commit, and publishes a parallel `v1`-named
-asset set. The full step-by-step checklist (including the post-push verification
-and the one-time GitHub Marketplace publish) lives in
+`v1.x.y` tag creates the GitHub Release, builds the four prebuilt binaries
+(Linux X64/ARM64, macOS ARM64, Windows X64), uploads them with checksums,
+force-moves the floating `v1` tag to the release commit, and publishes a
+parallel `v1`-named asset set. The full step-by-step checklist (including the
+post-push verification and the one-time GitHub Marketplace publish) lives in
 [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ## Nix packaging
