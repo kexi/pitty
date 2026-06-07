@@ -94,15 +94,34 @@ jobs:
   test-windows:
     name: test (Windows)
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
       # Non-ignored tests compile the Windows ConPTY backend and exercise the
-      # PTY-free contracts without assuming bash/Nix exists on Windows.
-      - name: cargo test
-        run: cargo test
+      # PTY-free contracts without assuming bash/Nix exists on Windows. Split
+      # them so a Windows-only hang names the specific target; serialize test
+      # threads because several tests intentionally mutate process env vars.
+      - name: cargo test (lib + bin)
+        timeout-minutes: 20
+        run: cargo test --lib --bins -- --test-threads=1
+      - name: cargo test (marketplace action contract)
+        timeout-minutes: 5
+        run: cargo test --test marketplace_action_contract -- --test-threads=1
+      - name: cargo test (release asset contract)
+        timeout-minutes: 5
+        run: cargo test --test release_asset_name_contract -- --test-threads=1
+      - name: cargo test (report JSON contract)
+        timeout-minutes: 5
+        run: cargo test --test report_json_contract -- --test-threads=1
+      - name: cargo test (schema contract)
+        timeout-minutes: 5
+        run: cargo test --test schema_contract -- --test-threads=1
+      - name: cargo test (file-only e2e)
+        timeout-minutes: 5
+        run: cargo test --test e2e -- --test-threads=1
       - name: cargo build
         run: cargo build
       # A minimal real-PTY smoke test covers the Windows-specific runtime path:
