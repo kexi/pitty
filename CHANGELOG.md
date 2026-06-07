@@ -15,9 +15,11 @@ releases; only 1.0.0 carries a release date.
 
 - **Prebuilt-binary release automation.** A tag-push-triggered workflow
   ([`.github/workflows/release.yml`](.github/workflows/release.yml)) builds
-  `pitty` for four `OS × arch` targets (Linux x86_64/aarch64, macOS
-  x86_64/arm64) and uploads each as `pitty-<ref>-<os>-<arch>.tar.gz` with a
-  `.sha256` checksum to the GitHub Release. The os/arch in the asset name use
+  `pitty` for three `OS × arch` targets (Linux x86_64/aarch64, macOS arm64) and
+  uploads each as `pitty-<ref>-<os>-<arch>.tar.gz` with a
+  `.sha256` checksum to the GitHub Release. (macOS Intel is served by the
+  composite action's `cargo install` fallback; GitHub's macos-13 runners were too
+  unreliably scheduled to gate a release on.) The os/arch in the asset name use
   the raw `uname -s`/`uname -m` values the composite action keys on, so the
   action's fast path now finds a prebuilt binary instead of always building from
   source. A contract test
