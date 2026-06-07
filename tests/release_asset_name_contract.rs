@@ -28,15 +28,19 @@ const ACTION_YML: &str = include_str!("../action.yml");
 /// The release workflow source, embedded so the test reads what ships.
 const RELEASE_YML: &str = include_str!("../.github/workflows/release.yml");
 
-/// The four `(uname -s, uname -m)` pairs pitty ships prebuilt binaries for.
+/// The `(uname -s, uname -m)` pairs pitty ships prebuilt binaries for.
 /// This is the single source of truth both sides are checked against.
 ///
 /// Apple Silicon is `arm64` here (its `uname -m`), deliberately distinct from
 /// the `aarch64` Rust triple, because the action keys on `uname` output.
+///
+/// No `("Darwin", "x86_64")`: GitHub's macos-13 Intel runners were unreliably
+/// scheduled and blocked releases, so Intel Macs fall back to `cargo install` in
+/// the composite action. Add the pair back here and in release.yml's matrix if a
+/// dependable Intel runner returns.
 const UNAME_PAIRS: &[(&str, &str)] = &[
     ("Linux", "x86_64"),
     ("Linux", "aarch64"),
-    ("Darwin", "x86_64"),
     ("Darwin", "arm64"),
 ];
 

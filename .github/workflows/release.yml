@@ -98,14 +98,16 @@ jobs:
             runner: ubuntu-latest
             os_name: Linux
             arch_name: aarch64
-          # macOS Intel: uname -s = Darwin, uname -m = x86_64. Native on macos-13.
-          - target: x86_64-apple-darwin
-            runner: macos-13
-            os_name: Darwin
-            arch_name: x86_64
           # Apple Silicon: uname -m = arm64 (NOT aarch64), even though the Rust
           # triple is aarch64-apple-darwin. The archive must be named `arm64` to
           # match what action.yml's `uname -m` produces on Apple Silicon runners.
+          #
+          # No macOS Intel (x86_64-apple-darwin) target: GitHub's macos-13 Intel
+          # runners are unreliably scheduled (queued indefinitely), which blocked
+          # the whole release. Intel Macs fall back to `cargo install` in the
+          # composite action instead. Re-add a `- target: x86_64-apple-darwin`
+          # entry (and the UNAME_PAIRS row in the contract test) if a dependable
+          # Intel runner returns.
           - target: aarch64-apple-darwin
             runner: macos-14
             os_name: Darwin
@@ -215,10 +217,7 @@ jobs:
             runner: ubuntu-latest
             os_name: Linux
             arch_name: aarch64
-          - target: x86_64-apple-darwin
-            runner: macos-13
-            os_name: Darwin
-            arch_name: x86_64
+          # No macOS Intel target — see the upload-assets matrix for why.
           - target: aarch64-apple-darwin
             runner: macos-14
             os_name: Darwin
