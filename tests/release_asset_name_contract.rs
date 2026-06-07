@@ -195,17 +195,19 @@ fn release_bin_name_matches_action_chmod_target() {
 fn release_jobs_all_guard_against_dotless_v1_repush() {
     // Recursion/double-upload regression guard. move-v1-tag force-pushes the
     // floating `v1` tag, which re-fires the `v*` trigger with ref_name `v1`. All
-    // three jobs must carry the `contains(github.ref_name, '.')` guard so that
-    // 2nd push is a complete no-op: without it on upload-assets, the 2nd run
-    // would re-upload `pitty-v1-...` assets and collide with upload-v1-assets.
-    // We assert the full guard expression appears once per job (three times).
+    // FOUR jobs (create-release, upload-assets, move-v1-tag, upload-v1-assets)
+    // must carry the `contains(github.ref_name, '.')` guard so that 2nd push is a
+    // complete no-op: without it on create-release/upload-assets, the 2nd run
+    // would recreate the `v1` release and re-upload `pitty-v1-...` assets,
+    // colliding with what move-v1-tag/upload-v1-assets already published.
+    // We assert the full guard expression appears once per job (four times).
     let guard = "if: ${{ startsWith(github.ref_name, 'v') && contains(github.ref_name, '.') }}";
     let occurrences = RELEASE_YML.matches(guard).count();
     assert_eq!(
-        occurrences, 3,
-        "all three jobs (upload-assets, move-v1-tag, upload-v1-assets) must carry the \
-         dotless-`v1` skip guard {guard:?} (found {occurrences}); otherwise a v1 \
-         force-move re-fires the trigger and re-uploads colliding assets"
+        occurrences, 4,
+        "all four jobs (create-release, upload-assets, move-v1-tag, upload-v1-assets) must \
+         carry the dotless-`v1` skip guard {guard:?} (found {occurrences}); otherwise a v1 \
+         force-move re-fires the trigger and recreates/re-uploads colliding releases/assets"
     );
 }
 
