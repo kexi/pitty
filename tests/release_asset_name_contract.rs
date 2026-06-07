@@ -19,7 +19,8 @@
 //! per-target `os_name`/`arch_name` matrix values. We verify (a) the action's
 //! download expression has the shape this test reproduces, (b) the release
 //! archive template concatenates ref, os_name, and arch_name in that order, and
-//! (c) every runner OS/arch pair appears as a matrix entry feeding that template.
+//! (c) every runner OS/arch pair appears as a matrix entry feeding that template
+//! for the patch, floating major, and floating minor release sets.
 //!
 //! Both files are embedded with `include_str!` so the test reads the exact
 //! bytes that ship.
@@ -113,20 +114,28 @@ fn action_handles_windows_executable_name_inside_tarball() {
 fn release_archive_template_orders_ref_os_arch_to_match_the_action() {
     // The release archive name must be `pitty-<ref>-<os>-<arch>` with os/arch
     // taken from the matrix's runner labels, in the same order the action's
-    // download URL uses. We check both refs the workflow publishes: the pushed
-    // tag (`github.ref_name`, e.g. v1.1.0) and the floating `v1`. A reordered or
-    // renamed segment here is the exact drift that silently breaks the fast path.
+    // download URL uses. We check all refs the workflow publishes: the pushed
+    // patch tag (`github.ref_name`, e.g. v1.2.0), the floating major (`v1`), and
+    // the floating minor (`v1.2`). A reordered or renamed segment here is the
+    // exact drift that silently breaks the fast path.
     let tag_template =
         "archive: pitty-${{ github.ref_name }}-${{ matrix.os_name }}-${{ matrix.arch_name }}";
-    let v1_template = "archive: pitty-v1-${{ matrix.os_name }}-${{ matrix.arch_name }}";
+    let major_template =
+        "archive: pitty-${{ needs.release-version.outputs.major }}-${{ matrix.os_name }}-${{ matrix.arch_name }}";
+    let minor_template =
+        "archive: pitty-${{ needs.release-version.outputs.minor }}-${{ matrix.os_name }}-${{ matrix.arch_name }}";
 
     assert!(
         RELEASE_YML.contains(tag_template),
         "release.yml must name the release-tag archive {tag_template:?} (ref-os-arch order)"
     );
     assert!(
-        RELEASE_YML.contains(v1_template),
-        "release.yml must name the v1 archive {v1_template:?} (ref-os-arch order)"
+        RELEASE_YML.contains(major_template),
+        "release.yml must name the floating-major archive {major_template:?} (ref-os-arch order)"
+    );
+    assert!(
+        RELEASE_YML.contains(minor_template),
+        "release.yml must name the floating-minor archive {minor_template:?} (ref-os-arch order)"
     );
 }
 
@@ -136,9 +145,10 @@ fn release_matrix_covers_exactly_the_runner_pairs() {
     // entry (os_name + arch_name on adjacent lines), so the templated archive
     // name above expands to exactly the names the action expects — no
     // missing target (a platform that always falls back to cargo) and no stray
-    // target naming an asset the action will never request. There are two
-    // matrix blocks (release-tag and v1); each pair must appear in both, so we
-    // require each pair to occur at least twice.
+    // target naming an asset the action will never request. There are three
+    // matrix blocks (release-tag, floating major, floating minor); each pair
+    // must appear in all three, so we require each pair to occur at least three
+    // times.
     // Match `os_name:`/`arch_name:` ignoring leading indentation so a
     // re-indentation of release.yml cannot silently turn this into a vacuous
     // pass (0 matches): we normalize every line to its trimmed form first.
@@ -154,25 +164,26 @@ fn release_matrix_covers_exactly_the_runner_pairs() {
     for (os, arch) in RUNNER_PAIRS {
         let occurrences = count_pair(os, arch);
         assert!(
-            occurrences >= 2,
-            "release.yml matrix must list runner pair ({os}, {arch}) in both the \
-             release-tag and v1 matrices (found {occurrences} occurrence(s))"
+            occurrences >= 3,
+            "release.yml matrix must list runner pair ({os}, {arch}) in the \
+             release-tag, floating-major, and floating-minor matrices (found \
+             {occurrences} occurrence(s))"
         );
     }
 
     // Guard against an extra target the action could not serve: count total
-    // matrix entries and require exactly 2 * RUNNER_PAIRS (two matrix blocks).
+    // matrix entries and require exactly 3 * RUNNER_PAIRS (three matrix blocks).
     let total_entries = trimmed_lines
         .iter()
         .filter(|l| l.starts_with("arch_name: "))
         .count();
     assert_eq!(
         total_entries,
-        2 * RUNNER_PAIRS.len(),
+        3 * RUNNER_PAIRS.len(),
         "release.yml has {total_entries} matrix arch_name entries; expected exactly \
-         {} (two matrix blocks of the {} runner pairs). An extra/missing target drifts \
+         {} (three matrix blocks of the {} runner pairs). An extra/missing target drifts \
          from the action's download set.",
-        2 * RUNNER_PAIRS.len(),
+        3 * RUNNER_PAIRS.len(),
         RUNNER_PAIRS.len(),
     );
 }
@@ -200,15 +211,15 @@ fn release_only_triggers_on_tag_push() {
 }
 
 #[test]
-fn release_pins_leading_dir_false_on_both_upload_steps() {
+fn release_pins_leading_dir_false_on_all_upload_steps() {
     // AC6: action.yml extracts the tarball with `tar -xzf -C $HOME/.local/bin`
     // and then chmods `pitty`/`pitty.exe`, i.e. it expects the binary at the
     // tarball ROOT (no `pitty-.../` subdirectory). That holds only if
     // upload-rust-binary-action is told `leading-dir: false`. The action's
     // default is not guaranteed across versions, so release.yml must state it
-    // explicitly on BOTH upload steps (release-tag and v1). If the default ever
+    // explicitly on all upload steps (release-tag, major, and minor). If the default ever
     // flips to a leading dir and this key is dropped, the action would hit "No
-    // such file" on chmod — this gate fails first. We require two occurrences,
+    // such file" on chmod — this gate fails first. We require three occurrences,
     // one per upload step. Match the trimmed line so comment prose mentioning
     // `leading-dir: false` is not miscounted as a YAML key.
     let occurrences = RELEASE_YML
@@ -216,9 +227,9 @@ fn release_pins_leading_dir_false_on_both_upload_steps() {
         .filter(|l| l.trim() == "leading-dir: false")
         .count();
     assert_eq!(
-        occurrences, 2,
-        "release.yml must pin `leading-dir: false` on both the release-tag and v1 \
-         upload steps (found {occurrences}); the action expects the binary at the \
+        occurrences, 3,
+        "release.yml must pin `leading-dir: false` on the release-tag, floating-major, \
+         and floating-minor upload steps (found {occurrences}); the action expects the binary at the \
          tarball root for chmod"
     );
 }
@@ -243,22 +254,30 @@ fn release_bin_name_matches_action_chmod_targets() {
 }
 
 #[test]
-fn release_jobs_all_guard_against_dotless_v1_repush() {
-    // Recursion/double-upload regression guard. move-v1-tag force-pushes the
-    // floating `v1` tag, which re-fires the `v*` trigger with ref_name `v1`. All
-    // FOUR jobs (create-release, upload-assets, move-v1-tag, upload-v1-assets)
-    // must carry the `contains(github.ref_name, '.')` guard so that 2nd push is a
-    // complete no-op: without it on create-release/upload-assets, the 2nd run
-    // would recreate the `v1` release and re-upload `pitty-v1-...` assets,
-    // colliding with what move-v1-tag/upload-v1-assets already published.
-    // We assert the full guard expression appears once per job (four times).
-    let guard = "if: ${{ startsWith(github.ref_name, 'v') && contains(github.ref_name, '.') }}";
+fn release_jobs_all_guard_against_floating_ref_repushes() {
+    // Recursion/double-upload regression guard. move-floating-tags force-pushes
+    // `v1` and `v1.2`, which both re-fire the broad `v*` trigger. GitHub Actions
+    // expressions have no regex operator, so release.yml parses the ref in Bash:
+    // only `vMAJOR.MINOR.PATCH` sets `should_publish=true`; floating major/minor
+    // refs set `should_publish=false`. All publishing jobs must depend on that
+    // parsed output so the re-triggered runs are complete no-ops.
+    assert!(
+        RELEASE_YML.contains(r#"[[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]"#),
+        "release.yml must parse only vMAJOR.MINOR.PATCH tags as publishable"
+    );
+    assert!(
+        RELEASE_YML.contains("should_publish=false"),
+        "release.yml must mark floating/non-patch refs as non-publishable"
+    );
+
+    let guard = "if: ${{ needs.release-version.outputs.should_publish == 'true' }}";
     let occurrences = RELEASE_YML.matches(guard).count();
     assert_eq!(
-        occurrences, 4,
-        "all four jobs (create-release, upload-assets, move-v1-tag, upload-v1-assets) must \
-         carry the dotless-`v1` skip guard {guard:?} (found {occurrences}); otherwise a v1 \
-         force-move re-fires the trigger and recreates/re-uploads colliding releases/assets"
+        occurrences, 5,
+        "all five publishing jobs (create-release, upload-assets, move-floating-tags, \
+         upload-major-assets, upload-minor-assets) must carry the parsed-ref guard \
+         {guard:?} (found {occurrences}); otherwise floating tag moves can re-fire \
+         the trigger and recreate/re-upload colliding releases/assets"
     );
 }
 

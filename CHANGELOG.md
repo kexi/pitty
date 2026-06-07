@@ -9,6 +9,15 @@ about the scenario format and the report JSON.
 The pre-1.0 entries below are development milestones, not separately tagged
 releases; only 1.0.0 carries a release date.
 
+## [Unreleased]
+
+### Added
+
+- **Marketplace-backed minor release refs.** Release automation now moves the
+  floating minor tag (for example `v1.2`) alongside the floating major tag and
+  publishes matching prebuilt assets, so GitHub Marketplace/Actions users can
+  pin either `@v1` or `@v1.2` without losing the fast path.
+
 ## [1.2.0] - 2026-06-07
 
 ### Added

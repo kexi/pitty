@@ -20,11 +20,11 @@
 //!   lowercase-kebab token and is not one of the icons GitHub explicitly blocks.
 //!
 //! What this does NOT do: it cannot press the "Publish this Action to the GitHub
-//! Marketplace" button — that step requires accepting the Marketplace agreement
-//! in the web UI and has no API. Once published once, later releases update the
-//! listing automatically. This gate only guarantees the metadata is always in a
-//! publishable shape so that manual first publish (and every auto-update after)
-//! cannot fail on a metadata regression.
+//! Marketplace" button — that first publish requires accepting the Marketplace
+//! agreement in the web UI and has no workflow/API switch. The first publish is
+//! already done for this repository, so later published GitHub Releases are the
+//! Marketplace update path. This gate guarantees those releases cannot fail on a
+//! metadata regression.
 
 /// The composite action source, embedded so the test reads exactly what ships.
 const ACTION_YML: &str = include_str!("../action.yml");
