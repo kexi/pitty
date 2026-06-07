@@ -2,7 +2,7 @@
 name = "pitty"
 version = "1.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 description = "PTY-based CLI testing framework"
 repository = "https://github.com/kexi/pitty"
 readme = "README.md"
@@ -26,7 +26,8 @@ regex = "1"
 clap = { version = "4", features = ["derive"] }
 thiserror = "1"
 tempfile = "3"
-# similar is Apache-2.0; compatible with this crate's MIT OR Apache-2.0 license.
+# similar is MIT OR Apache-2.0; its MIT option is compatible with this crate's
+# MIT license.
 similar = "2"
 
 [dev-dependencies]
