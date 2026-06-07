@@ -1,0 +1,16 @@
+# vibe --help: prints usage with the subcommand list and exits 0.
+name: vibe-help
+steps:
+  - spawn: "${VIBE_BIN} --help"
+  - expect:
+      contains: "git worktree helper"
+      timeout: 5s
+  - expect:
+      contains: "vibe start"
+      timeout: 5s
+  - expect:
+      contains: "vibe clean"
+      timeout: 5s
+  - expect_exit:
+      code: 0
+      timeout: 5s
