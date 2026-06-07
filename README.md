@@ -657,9 +657,4 @@ is the one workflow where a secret is in scope.
 
 ## License
 
-Dual-licensed under either of
-
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-
-at your option.
+Licensed under the MIT license ([LICENSE](LICENSE)).
