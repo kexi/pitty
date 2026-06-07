@@ -13,22 +13,44 @@
   outputs = { self, nixpkgs, flake-utils, rust-overlay }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nixpkgs {
+        pkgs = import nixpkgs { inherit system; };
+        devPkgs = import nixpkgs {
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+        rustToolchain = devPkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rustfmt" "clippy" ];
         };
+        pitty = pkgs.callPackage ./nix/package.nix { };
       in
       {
-        devShells.default = pkgs.mkShell {
+        packages = {
+          default = pitty;
+          pitty = pitty;
+        };
+
+        apps = {
+          default = {
+            type = "app";
+            program = "${pitty}/bin/pitty";
+            meta.description = "Run pitty";
+          };
+          pitty = {
+            type = "app";
+            program = "${pitty}/bin/pitty";
+            meta.description = "Run pitty";
+          };
+        };
+
+        checks.pitty = pitty;
+
+        devShells.default = devPkgs.mkShell {
           buildInputs = [
             rustToolchain
-            pkgs.pkg-config
-            pkgs.just
-            pkgs.lefthook
-            pkgs.gitleaks
+            devPkgs.pkg-config
+            devPkgs.just
+            devPkgs.lefthook
+            devPkgs.gitleaks
           ];
           # Install the lefthook git hooks on entering the dev shell so the
           # gitleaks pre-commit tripwire (lefthook.yml) is wired up without a
