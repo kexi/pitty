@@ -27,7 +27,16 @@
             rustToolchain
             pkgs.pkg-config
             pkgs.just
+            pkgs.lefthook
+            pkgs.gitleaks
           ];
+          # Install the lefthook git hooks on entering the dev shell so the
+          # gitleaks pre-commit tripwire (lefthook.yml) is wired up without a
+          # manual step. `lefthook install` is idempotent; silence it when there
+          # is no .git dir (e.g. a tarball checkout) so the shell still loads.
+          shellHook = ''
+            if [ -d .git ]; then lefthook install >/dev/null 2>&1 || true; fi
+          '';
         };
       });
 }

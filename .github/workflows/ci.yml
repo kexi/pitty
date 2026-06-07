@@ -38,6 +38,37 @@ jobs:
       - name: cargo clippy
         run: nix develop --command cargo clippy --all-targets -- -D warnings
 
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    # The action comments findings on the PR via GITHUB_TOKEN, which needs write
+    # access to pull requests. Granted only here, not at the top level, so every
+    # other job keeps the read-only default. contents:read is restated because
+    # declaring job-level permissions drops the inherited top-level set.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # fetch-depth: 0 so the scan can resolve the PR base ref and check every
+      # commit in the range — catching a secret added in an intermediate commit
+      # even if a later commit removes it. On push it scans the full history.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      # The official action over a dev-shell `run:` step: it bundles a maintained
+      # scanner and posts findings as PR comments. SHA-pinned because a secret
+      # scanner with a write-scoped token is supply-chain sensitive.
+      #
+      # Config-tampering note: the action reads whatever .gitleaks.toml is in the
+      # tree, so it does NOT by itself stop a PR from weakening the ruleset in the
+      # same PR. Guard that operationally (review / branch protection requiring
+      # this check). GITLEAKS_LICENSE is only needed for org repos; this is a
+      # personal repo, so it is intentionally omitted.
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
   test:
     name: test (unit + integration)
     runs-on: ubuntu-latest
