@@ -99,6 +99,31 @@ asset set. The full step-by-step checklist (including the post-push verification
 and the one-time GitHub Marketplace publish) lives in
 [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
+## Nix packaging
+
+The flake exposes a source-built package and app:
+
+```sh
+nix build .#pitty
+nix run .#pitty -- --help
+nix flake check
+```
+
+The package expression lives in [`nix/package.nix`](nix/package.nix) and uses
+nixpkgs' standard `rustPlatform.buildRustPackage`, not the dev shell's
+`rust-overlay` toolchain. Keep it that way so the expression stays close to
+what nixpkgs expects for an official package.
+
+`Cargo.lock` is intentionally tracked. `pitty` is an application, and the lock
+file keeps Nix source builds reproducible. When dependencies change, rebuild the
+Nix package and update `cargoHash` in `nix/package.nix` if Nix reports a new
+vendor hash.
+
+For a future nixpkgs submission, copy the shape of `nix/package.nix`, set
+`version` explicitly, replace the local `src` default with `fetchFromGitHub`,
+set the release `hash`, keep the reported `cargoHash`, and add the nixpkgs
+maintainer entry.
+
 ## Further reading
 
 - [`SCHEMA.md`](SCHEMA.md) — the full scenario-format specification.

@@ -28,17 +28,31 @@ test sees a genuine terminal.
 
 ## Install
 
-`pitty` is a Rust project. With Nix and direnv:
+With Nix flakes:
+
+```sh
+nix profile install github:kexi/pitty
+pitty --help
+```
+
+Or run/build from source without installing:
+
+```sh
+nix run github:kexi/pitty -- --help
+nix build github:kexi/pitty
+./result/bin/pitty --help
+```
+
+Once pitty is available from nixpkgs, the install target will be:
+
+```sh
+nix profile install nixpkgs#pitty
+```
+
+For development, use the repo's dev shell:
 
 ```sh
 direnv allow        # loads the dev shell (rust toolchain via rust-overlay)
-cargo build --release
-```
-
-Or directly inside the dev shell:
-
-```sh
-nix develop
 cargo build --release
 ```
 
