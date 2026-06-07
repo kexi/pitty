@@ -93,6 +93,18 @@ jobs:
           test -x "$PITTY_BIN" || { echo "PITTY_BIN not executable: $PITTY_BIN" >&2; exit 1; }
           test -d "$INNER_DIR" || { echo "INNER_DIR not a directory: $INNER_DIR" >&2; exit 1; }
           nix develop --command "$PITTY_BIN" run e2e/scenarios/meta
+      # Dogfood the matrix/bench subcommands too: e2e/scenarios/samples carries
+      # passing matrix (single- and multi-axis) and bench scenarios. `run` does
+      # not exercise these subcommands, so without this step a regression in
+      # `pitty matrix`/`pitty bench` would not be caught by CI. Each subcommand
+      # exits 0 on an all-pass scenario; a failing cell/run flips it non-zero.
+      - name: dogfood samples tier (matrix + bench)
+        run: |
+          export PITTY_BIN="$PWD/target/debug/pitty"
+          test -x "$PITTY_BIN" || { echo "PITTY_BIN not executable: $PITTY_BIN" >&2; exit 1; }
+          nix develop --command "$PITTY_BIN" matrix e2e/scenarios/samples/matrix-shell.yaml
+          nix develop --command "$PITTY_BIN" matrix e2e/scenarios/samples/matrix-multi-axis.yaml
+          nix develop --command "$PITTY_BIN" bench e2e/scenarios/samples/bench-shell.yaml --runs 3
 
   pty-e2e-macos:
     name: pty-e2e (macOS)
@@ -125,3 +137,11 @@ jobs:
           test -x "$PITTY_BIN" || { echo "PITTY_BIN not executable: $PITTY_BIN" >&2; exit 1; }
           test -d "$INNER_DIR" || { echo "INNER_DIR not a directory: $INNER_DIR" >&2; exit 1; }
           nix develop --command "$PITTY_BIN" run e2e/scenarios/meta
+      # Dogfood the matrix/bench subcommands too (see the ubuntu job for why).
+      - name: dogfood samples tier (matrix + bench)
+        run: |
+          export PITTY_BIN="$PWD/target/debug/pitty"
+          test -x "$PITTY_BIN" || { echo "PITTY_BIN not executable: $PITTY_BIN" >&2; exit 1; }
+          nix develop --command "$PITTY_BIN" matrix e2e/scenarios/samples/matrix-shell.yaml
+          nix develop --command "$PITTY_BIN" matrix e2e/scenarios/samples/matrix-multi-axis.yaml
+          nix develop --command "$PITTY_BIN" bench e2e/scenarios/samples/bench-shell.yaml --runs 3
