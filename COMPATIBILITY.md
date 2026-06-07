@@ -96,6 +96,24 @@ When cutting a release:
         (`Installing prebuilt pitty from ...` + `Verified sha256 of ...`),
         not the `cargo install` fallback.
 
+### Publishing the Action to the GitHub Marketplace
+
+The composite action's Marketplace **metadata** (`name`, `description`,
+`branding.icon`/`color`) is machine-checked on every CI run by
+[`tests/marketplace_action_contract.rs`](tests/marketplace_action_contract.rs),
+so the listing can never drift out of a publishable shape.
+
+The **publish step itself cannot be automated** — GitHub exposes no API for it
+and requires accepting the Marketplace Developer Agreement in the web UI. It is
+a **one-time manual action**:
+
+- [ ] After the first release exists, open the release on GitHub and tick
+      **"Publish this Action to the GitHub Marketplace"**, accept the agreement,
+      and pick a category. (Requires the metadata above, which CI already
+      guarantees.)
+- [ ] Once published, **every later release updates the Marketplace listing
+      automatically** — no further manual step per release.
+
 ## What is explicitly out of scope for stability
 
 - Exit code numbers (0/1/2/3) are stable, but the exact wording of error and
