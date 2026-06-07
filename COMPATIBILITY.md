@@ -64,25 +64,28 @@ Cutting a release is **automated** by
 Windows X64), uploads them with checksums, force-moves the floating `v1` major
 tag and `v1.x` minor tag to the release commit, and publishes parallel
 floating-ref asset sets. The composite action's `version` input therefore
-defaults to `v1`, while callers that want a minor-line pin can set
-`version: v1.x`.
+defaults to the action ref used in `uses: kexi/pitty@...`, so callers can pin
+`@v1`, a floating minor ref such as `@v1.x` once it exists, or an exact patch
+tag and get matching assets.
 
 The first release (v1.1.0) has run, so the `v1` tag and assets exist and
 `uses: kexi/pitty@v1` resolves. (Historically, before that first release, `@v1`
 could not resolve and `@main`/a SHA was needed; that bootstrap window is closed.)
+The current `v1.2.0` release was cut before minor floating release automation
+landed, so `v1.2` will first appear on the next `v1.2.y` release.
 
 When cutting a release:
 
 - [ ] Bump the crate `version` in `Cargo.toml`, refresh `Cargo.lock`, and add a
       `CHANGELOG.md` entry.
-- [ ] Push the release tag (e.g. `v1.2.0`). The release workflow then, on its
+- [ ] Push the release tag (e.g. `v1.2.1`). The release workflow then, on its
       own: creates the GitHub Release, builds the four `OS × arch` binaries,
       uploads `pitty-<tag>-<runner-os>-<runner-arch>.tar.gz` (+ `.sha256`) to
-      the release, force-moves the `v1` and `v1.2` tags to the release commit,
-      and publishes the matching `pitty-v1-...` and `pitty-v1.2-...` asset sets
-      to their floating releases.
+      the release, force-moves the `v1` and matching `v1.x` tags to the release
+      commit, and publishes the matching `pitty-v1-...` and `pitty-v1.x-...`
+      asset sets to their floating releases.
 - [ ] Verify the run is green and the twelve archives (four per ref: Linux
-      X64/ARM64, macOS ARM64, Windows X64; refs are `v1.2.0`, `v1`, and `v1.2`)
+      X64/ARM64, macOS ARM64, Windows X64; refs are `<tag>`, `v1`, and `v1.x`)
       plus their checksums are attached.
       The asset names are
       machine-checked against `action.yml` by
@@ -97,7 +100,7 @@ When cutting a release:
         Windows x64 asset is named `...-Windows-X64.tar.gz`; asset names use
         GitHub `RUNNER_OS`/`RUNNER_ARCH` labels, not Rust target triples or
         Git-Bash `uname` values.
-  - [ ] On the `v*` pushes caused by the `v1`/`v1.2` force-moves, the parse job
+  - [ ] On the `v*` pushes caused by the `v1`/`v1.x` force-moves, the parse job
         marks them non-publishable and all publishing jobs skip — no duplicate
         upload.
   - [ ] A consumer run's "Install pitty" log shows the prebuilt fast path
@@ -117,9 +120,10 @@ repo and `uses: kexi/pitty@v1` are unaffected.
 The initial publish step cannot be automated — GitHub exposes no workflow/API
 switch for it and requires accepting the Marketplace Developer Agreement in the
 web UI. That first publish is already complete for this repository. From here,
-the release workflow's published GitHub Releases (`v1.2.0`, plus the refreshed
-`v1`/`v1.2` floating releases) are the Marketplace update path; no further
-manual Marketplace step is expected per release.
+the release workflow's published GitHub Releases (`v1.2.0` today, refreshed `v1`
+today, and refreshed `v1.x` floating releases on future `v1.x.y` releases) are
+the Marketplace update path; no further manual Marketplace step is expected per
+release.
 
 ## What is explicitly out of scope for stability
 

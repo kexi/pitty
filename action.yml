@@ -10,18 +10,18 @@
 # annotations automatically, so no extra flag is required here. The step's exit
 # code is the verdict (0 pass / 1 assertion / 2 scenario / 3 process).
 #
-# RELEASE NOTE (read before tagging v1.x.y): the default `version` input below is
-# `v1`, the floating major tag the release automation (.github/workflows/
-# release.yml) creates and force-moves on every `v1.x.y` tag push. That release
-# also publishes `pitty-v1-<runner-os>-<runner-arch>.tar.gz` assets to the `v1`
-# release, so this default both resolves the source fallback (`cargo install
-# --git --tag v1`) AND hits the prebuilt fast path. The workflow also maintains
-# a floating minor ref (e.g. `v1.2`) and matching assets for callers that want to
-# stay within a minor line. ORDERING: `@v1` only works after the first release
-# (v1.1.0) has run and created the `v1` tag + assets; before that, pin `@main`
-# or a SHA. Why not keep the default `main`: once `v1` exists it is the stable,
-# prebuilt-backed ref consumers should get by default. The release checklist in
-# COMPATIBILITY.md tracks the tag/asset creation order.
+# RELEASE NOTE (read before tagging v1.x.y): when callers omit `version`, the
+# installer follows the action ref (`github.action_ref`) used in `uses:
+# kexi/pitty@...`. That keeps the source ref and prebuilt-asset ref aligned:
+# `@v1` downloads `pitty-v1-...`, `@v1.2` downloads `pitty-v1.2-...`, and a patch
+# tag downloads its exact patch assets. The release automation
+# (.github/workflows/release.yml) creates those release assets for every full
+# patch tag push and maintains floating major/minor refs from then on. ORDERING:
+# `@v1` only works after the first release (v1.1.0) has run and created the `v1`
+# tag + assets; before that, pin `@main` or a SHA. Why not keep a hardcoded
+# `version: v1` default: minor/patch-pinned action refs would then silently run a
+# binary from the floating major release instead of the ref the caller chose.
+# The release checklist in COMPATIBILITY.md tracks the tag/asset creation order.
 #
 # `name` is the GitHub Marketplace listing name and must be globally unique — it
 # cannot match an existing action, user, or org. Plain `pitty` collides with the
@@ -50,13 +50,12 @@ inputs:
     description: >-
       pitty ref to install. Selects both the prebuilt-binary release asset
       (`pitty-<version>-<runner-os>-<runner-arch>.tar.gz`) and the `cargo
-      install --git` source fallback ref. Defaults to `v1`, the floating major
-      tag the release automation maintains; use a floating minor tag (e.g.
-      `v1.2`) to stay on one minor line, pin a specific patch tag (e.g.
-      `v1.2.0`) to lock a version, or pin a SHA. Note `v1` only resolves after
-      the first release publishes it.
+      install --git` source fallback ref. Defaults to the action ref from
+      `uses: kexi/pitty@...`, so `@v1`, `@v1.2`, and `@v1.2.0` look for matching
+      release assets. Set this only to intentionally install a different pitty
+      ref than the action ref.
     required: false
-    default: v1
+    default: ""
 
 runs:
   using: composite
@@ -80,7 +79,8 @@ runs:
     - name: Install pitty
       shell: bash
       env:
-        PITTY_REF: ${{ inputs.version }}
+        PITTY_ACTION_REF: ${{ github.action_ref }}
+        PITTY_INPUT_REF: ${{ inputs.version }}
         PITTY_REPO: https://github.com/kexi/pitty
       run: |
         set -euo pipefail
@@ -88,6 +88,18 @@ runs:
         if command -v pitty >/dev/null 2>&1; then
           echo "pitty already on PATH: $(command -v pitty)"
           exit 0
+        fi
+
+        input_ref="${PITTY_INPUT_REF:-}"
+        action_ref="${PITTY_ACTION_REF:-}"
+        if [ -n "$input_ref" ]; then
+          PITTY_REF="$input_ref"
+        elif [ -n "$action_ref" ]; then
+          PITTY_REF="$action_ref"
+        else
+          # Local actions (`uses: ./`) have no action ref; keep the historical
+          # stable fallback instead of trying to download `pitty--...`.
+          PITTY_REF="v1"
         fi
 
         os="${RUNNER_OS:?RUNNER_OS is not set}"

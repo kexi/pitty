@@ -14,9 +14,13 @@ releases; only 1.0.0 carries a release date.
 ### Added
 
 - **Marketplace-backed minor release refs.** Release automation now moves the
-  floating minor tag (for example `v1.2`) alongside the floating major tag and
-  publishes matching prebuilt assets, so GitHub Marketplace/Actions users can
-  pin either `@v1` or `@v1.2` without losing the fast path.
+  floating minor tag (for example `v1.2`) alongside the floating major tag on
+  future patch-tag releases and publishes matching prebuilt assets, so GitHub
+  Marketplace/Actions users can pin either `@v1` or a minor line without losing
+  the fast path.
+- **Action-ref-aligned installs.** When the composite action's `version` input
+  is omitted, the installer now follows the ref used in `uses: kexi/pitty@...`
+  instead of always installing from `v1`.
 
 ## [1.2.0] - 2026-06-07
 
