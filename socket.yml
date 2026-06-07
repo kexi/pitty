@@ -1,0 +1,19 @@
+# Socket.dev project configuration (repo-root, read by Socket's CLI/GitHub app).
+#
+# This is the *project* config; the scanning *workflow* lives separately at
+# .github/workflows/socket.yml. issueRules toggle whole alert categories
+# repo-wide (Socket's socket.yml cannot scope a rule to a single package — that
+# requires the dashboard).
+#
+# Why disable obfuscatedFile: Socket flags `cargo/libc` as ~90% obfuscated, but
+# libc is the official rust-lang FFI crate pulled transitively by portable-pty,
+# tempfile, rustix, and nix — all unavoidable for a PTY tool. The heuristic
+# trips on libc's machine-generated, per-platform constant tables (thousands of
+# `pub const` lines), not on anything malicious. Since the obfuscation heuristic
+# is low-value for typical Rust dependencies (and there is no per-package
+# suppression in socket.yml), we turn this one category off. malware,
+# vulnerability, install-script, typo-squat, and the other categories stay on.
+version: 2
+
+issueRules:
+  obfuscatedFile: false
