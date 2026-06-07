@@ -42,9 +42,8 @@ nix develop
 cargo build --release
 ```
 
-The dev shell also provides a [`just`](https://github.com/casey/just) task
-runner — run `just` to list recipes (`just build`, `just test`, `just lint`,
-`just dogfood`, `just ci`, …).
+Building pitty itself, the test tiers, and the release process are covered in
+[`docs/development.md`](docs/development.md).
 
 ## Quick start
 
@@ -599,15 +598,6 @@ Each run writes `logs/<scenario>.log` containing the captured terminal output
 and per-step results. Log files are created with `0600` permissions, and
 registered secret values are replaced with `***` before anything is written.
 
-## Concurrency model
-
-`pitty` is synchronous on the surface. Internally, one dedicated reader
-thread drains the (blocking) PTY master into a shared buffer and notifies a
-`Condvar`; `expect` waits on that condvar so a match is observed the instant
-output arrives, with a bounded timeout. We avoid an async runtime because
-`portable-pty`'s reader/writer are blocking — wrapping them in `tokio` would
-require blocking tasks anyway.
-
 ## Security and trust model
 
 > **pitty is single-trust (unchanged since v0.1).** You run your own
@@ -626,51 +616,11 @@ Minimal guards (in place since v0.1):
   is dropped at the end of a run. On `Ctrl-C` or a panic, a temp directory may
   be left behind (cleanup relies on `TempDir`'s `Drop`, unchanged since v0.1).
 
-## Dogfooding
+## Contributing
 
-`pitty` tests itself by running `pitty run` over the scenarios in `e2e/`.
-A `positive/` tier runs scenarios directly, and a nested-PTY `meta/` tier spawns
-an inner `pitty` on scenarios that fail by design and asserts their exit codes
-(and secret masking). See [`e2e/README.md`](e2e/README.md) for the tiers and the
-`PITTY_BIN` / `INNER_DIR` environment-variable convention.
-
-```sh
-nix develop --command cargo build
-export PITTY_BIN="$PWD/target/debug/pitty"
-export INNER_DIR="$PWD/e2e/scenarios/meta/inner"
-nix develop --command "$PITTY_BIN" run e2e/scenarios/positive   # must exit 0
-nix develop --command "$PITTY_BIN" run e2e/scenarios/meta       # must exit 0
-```
-
-CI runs these tiers — plus a `samples/` tier exercising the `matrix` and `bench`
-subcommands, and the residual `#[ignore]` PTY tests — on **both Linux and macOS
-as required gates** via `nix develop`, so a macOS PTY regression blocks merges.
-The meta tier asserts inner exit via `expect_exit`'s deadline form so the macOS
-gate stays non-flaky despite slower PTY teardown. See
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Locally, `just dogfood`
-runs all three tiers and `just ci` reproduces the full gate set.
-
-## Security scanning
-
-Two scanners guard the repository:
-
-- **Secret scanning (gitleaks).** A pre-commit hook (via
-  [lefthook](https://github.com/evilmartians/lefthook), installed automatically
-  by the nix dev shell) runs `gitleaks git --staged` on every commit, so a
-  secret is caught before it lands. The authoritative gate is the `gitleaks` job
-  in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which scans full
-  history on push (and the PR range on pull requests) — the hook is bypassable
-  with `git commit --no-verify`, so CI is the backstop. Both read the in-repo
-  [`.gitleaks.toml`](.gitleaks.toml), which extends gitleaks' default ruleset
-  and deliberately ships no broad allowlist.
-- **Supply-chain scanning (Socket).** A separate
-  [Socket](https://socket.dev) workflow
-  ([`.github/workflows/socket.yml`](.github/workflows/socket.yml)) scans the
-  dependency manifest (`Cargo.toml`) for malicious or risky crates. It needs a
-  `SOCKET_SECURITY_API_KEY` repository (or org) Actions secret; without it the
-  scan step is skipped (so pull requests from forks, which cannot see the
-  secret, do not fail). Its actions are pinned to commit SHAs because this is a
-  workflow where a secret is in scope.
+Working on pitty itself — the dev environment, the test tiers, security
+scanning, and the release process — is documented in
+[`docs/development.md`](docs/development.md).
 
 ## License
 
