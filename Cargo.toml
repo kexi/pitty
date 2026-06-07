@@ -1,0 +1,32 @@
+[package]
+name = "pitty"
+version = "1.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "PTY-based CLI testing framework"
+repository = "https://github.com/kexi/pitty"
+readme = "README.md"
+keywords = ["pty", "e2e", "testing", "cli", "terminal"]
+categories = ["command-line-utilities", "development-tools::testing"]
+
+[[bin]]
+name = "pitty"
+path = "src/main.rs"
+
+[lib]
+name = "pitty"
+path = "src/lib.rs"
+
+[dependencies]
+portable-pty = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_norway = "0.9"
+serde_json = "1"
+regex = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "1"
+tempfile = "3"
+# similar is Apache-2.0; compatible with this crate's MIT OR Apache-2.0 license.
+similar = "2"
+
+[dev-dependencies]

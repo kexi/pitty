@@ -1,0 +1,200 @@
+# Release automation: build prebuilt pitty binaries and publish them to a
+# GitHub Release, then move the floating `v1` major tag and publish a second set
+# of assets named for `v1` so `uses: kexi/pitty@v1` resolves a prebuilt binary.
+#
+# Trigger: this runs ONLY on a `v*` tag push (e.g. `v1.1.0`), never on
+# `pull_request`. A release job has `contents: write` and the GITHUB_TOKEN in
+# scope; restricting it to tag pushes from this repo keeps that token away from
+# untrusted fork code (a fork can open a PR but cannot push a tag here), which is
+# why there is deliberately no `pull_request`/`pull_request_target` trigger.
+#
+# Asset-name contract (the load-bearing detail): action.yml downloads
+#   pitty-${ref}-$(uname -s)-$(uname -m).tar.gz
+# so the archive names produced here MUST use the raw `uname` os/arch values, not
+# the Rust target triple. In particular Apple Silicon is `arm64` from `uname -m`
+# even though we build the `aarch64-apple-darwin` triple — the archive is named
+# `...-Darwin-arm64.tar.gz`, NOT `...-aarch64-...`. A mismatch makes the action's
+# fast path 404 and silently fall back to a slow `cargo install`, so the
+# `release_asset_name_contract.rs` test pins both sides to one source of truth.
+#
+# Action pinning: every action is pinned to an immutable commit SHA (with a
+# version comment), stricter than ci.yml's major-tag pinning, because this is a
+# workflow where a write-scoped GITHUB_TOKEN is in scope — a compromised mutable
+# tag here could publish tampered release assets. Bump the SHAs deliberately.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Least privilege: the only write this workflow needs is creating the GitHub
+# Release and uploading its assets (`contents: write`). It does not need
+# packages, id-token, or any other scope.
+permissions:
+  contents: write
+
+jobs:
+  # Build one prebuilt binary per OS x arch and upload it under BOTH the pushed
+  # tag (e.g. v1.1.0) and the floating `v1` ref. upload-rust-binary-action's
+  # `ref` input selects which release/tag the asset attaches to and feeds the
+  # `$tag` template variable, so the same matrix entry produces, for one target:
+  #   pitty-v1.1.0-<os>-<arch>.tar.gz   (attached to the v1.1.0 release)
+  #   pitty-v1-<os>-<arch>.tar.gz       (attached to the v1 release)
+  upload-assets:
+    name: ${{ matrix.os_name }}-${{ matrix.arch_name }} (${{ matrix.target }})
+    # Skip the dotless `v1` push. Why: move-v1-tag force-pushes the floating
+    # `v1` tag, which fires the `v*` trigger a second time with ref_name `v1`.
+    # Without this guard that 2nd run would re-build and re-upload assets named
+    # `pitty-v1-...` (ref_name=v1), colliding with the assets upload-v1-assets
+    # already attached to the `v1` release. The `contains('.')` clause excludes
+    # the dotless `v1` so all three jobs (this, move-v1-tag, upload-v1-assets)
+    # become no-ops on the 2nd push, ending the recursion. `startsWith('v')` is
+    # redundant with the `v*` trigger but kept explicit in case that broadens.
+    if: ${{ startsWith(github.ref_name, 'v') && contains(github.ref_name, '.') }}
+    strategy:
+      # Build every target even if one fails, so a single broken cross build
+      # does not hide the status of the others.
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64: uname -s = Linux, uname -m = x86_64. Native build.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            os_name: Linux
+            arch_name: x86_64
+          # Linux aarch64: uname -m = aarch64 on a Linux ARM host. Cross-built
+          # from an x86_64 runner via upload-rust-binary-action's
+          # `build-tool: cross` (which invokes the `cross` tool under the hood;
+          # no separate cross action is used).
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            os_name: Linux
+            arch_name: aarch64
+          # macOS Intel: uname -s = Darwin, uname -m = x86_64. Native on macos-13.
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            os_name: Darwin
+            arch_name: x86_64
+          # Apple Silicon: uname -m = arm64 (NOT aarch64), even though the Rust
+          # triple is aarch64-apple-darwin. The archive must be named `arm64` to
+          # match what action.yml's `uname -m` produces on Apple Silicon runners.
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            os_name: Darwin
+            arch_name: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Publish the asset under the pushed tag (e.g. v1.1.0). `archive` is a
+      # literal name embedding the raw uname os/arch (not $target) so it matches
+      # action.yml's download URL exactly; `leading-dir: false` places the
+      # `pitty` binary at the tarball root so the action's
+      # `tar -xzf -C $HOME/.local/bin` yields `$HOME/.local/bin/pitty`.
+      # Why not rely on the action default: a future upload-rust-binary-action
+      # release could flip the default to a leading `pitty-.../` directory,
+      # which would make action.yml's `chmod +x "$HOME/.local/bin/pitty"` hit
+      # "No such file"; pinning it here fixes the tarball layout regardless.
+      - name: Upload assets for the release tag
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
+        with:
+          bin: pitty
+          target: ${{ matrix.target }}
+          # Cross-build Linux aarch64 via `cross`; native build for the rest.
+          build-tool: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'cross' || 'cargo' }}
+          archive: pitty-${{ github.ref_name }}-${{ matrix.os_name }}-${{ matrix.arch_name }}
+          leading-dir: false
+          tar: all
+          zip: none
+          checksum: sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Move the floating `v1` major tag to this release commit and publish a second
+  # set of assets named for `v1`. This runs after the per-target uploads so the
+  # `v1.1.0` release exists first. The action.yml default `version` input is
+  # `v1`, so without these `v1`-named assets the fast path would 404 and silently
+  # fall back to `cargo install`; the asset-name contract test guards the names.
+  move-v1-tag:
+    name: move v1 tag and publish v1 assets
+    needs: [upload-assets]
+    runs-on: ubuntu-latest
+    # Only on a vMAJOR.MINOR.PATCH tag (e.g. v1.1.0), not on the `v1` move below
+    # re-triggering this workflow. Force-pushing `v1` fires another `v*` tag
+    # push; the `contains('.')` clause excludes the dotless `v1` so it does not
+    # recurse into a second v1 move. `startsWith('v')` is redundant with the
+    # `v*` trigger filter but kept as an explicit guard in case that broadens.
+    if: ${{ startsWith(github.ref_name, 'v') && contains(github.ref_name, '.') }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Full history so the tag move points at a real commit object.
+          fetch-depth: 0
+
+      # Force-move `v1` to the release commit so `uses: kexi/pitty@v1` and
+      # `cargo install --git --tag v1` resolve to this release. The push uses the
+      # workflow GITHUB_TOKEN (contents: write), so no PAT is needed.
+      - name: Move v1 tag to the release commit
+        run: |
+          set -euo pipefail
+          # Derive the major tag from the pushed tag: v1.1.0 -> v1. Why parse the
+          # ref instead of hardcoding `v1`: a future v2.0.0 push reuses this same
+          # job to maintain a `v2` floating tag with no edit.
+          major="$(printf '%s' "${GITHUB_REF_NAME}" | sed -E 's/^(v[0-9]+).*/\1/')"
+          echo "Moving floating major tag ${major} to ${GITHUB_SHA}"
+          git tag -f "${major}" "${GITHUB_SHA}"
+          git push -f origin "refs/tags/${major}"
+
+  # Build the same four targets again, but attach the archives to the `v1`
+  # release under `v1`-named files. A separate matrix job (rather than reusing
+  # upload-assets) because `ref` must point at `v1`, which only exists after
+  # move-v1-tag has run.
+  upload-v1-assets:
+    name: v1 ${{ matrix.os_name }}-${{ matrix.arch_name }} (${{ matrix.target }})
+    needs: [move-v1-tag]
+    if: ${{ startsWith(github.ref_name, 'v') && contains(github.ref_name, '.') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            os_name: Linux
+            arch_name: x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            os_name: Linux
+            arch_name: aarch64
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            os_name: Darwin
+            arch_name: x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            os_name: Darwin
+            arch_name: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # `ref: refs/tags/v1` attaches these assets to the `v1` release and sets
+      # the `$tag` template variable to `v1`; the literal `archive` name encodes
+      # `v1` plus the raw uname os/arch, matching the action's default
+      # `version: v1` download URL. `leading-dir: false` keeps the binary at the
+      # tarball root (see the release-tag step for why this is pinned, not left
+      # to the action default).
+      - name: Upload assets for the v1 tag
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
+        with:
+          bin: pitty
+          target: ${{ matrix.target }}
+          build-tool: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'cross' || 'cargo' }}
+          ref: refs/tags/v1
+          archive: pitty-v1-${{ matrix.os_name }}-${{ matrix.arch_name }}
+          leading-dir: false
+          tar: all
+          zip: none
+          checksum: sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

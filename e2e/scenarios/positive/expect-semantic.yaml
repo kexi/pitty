@@ -1,0 +1,18 @@
+# Dogfood: expect_semantic over a real PTY. After the shell prints a known
+# message, expect_semantic asserts the output is lexically close to an expected
+# text above a threshold. Proves the lexical-approximation backend works end to
+# end when pitty runs itself. (snapshot is not dogfooded here because it would
+# commit a terminal-dependent snapshot file into the repo.)
+name: expect-semantic
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  - send: echo "Authentication failed due to an expired token"
+  - expect:
+      contains: Authentication
+      timeout: 10s
+  - expect_semantic:
+      text: |
+        authentication failed expired token
+      similarity: 0.5

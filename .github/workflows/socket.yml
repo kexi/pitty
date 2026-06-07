@@ -1,0 +1,55 @@
+# Socket.dev supply-chain scan.
+#
+# Runs the Socket CLI (https://docs.socket.dev) against this repo's dependency
+# manifests (Cargo.toml / Cargo.lock) to flag malicious, risky, or vulnerable
+# crates before they land. Kept in its own workflow so a Socket outage or a
+# missing API key degrades supply-chain scanning without taking down the main
+# CI gate (ci.yml).
+#
+# Why SHA-pinned actions here (unlike ci.yml's major tags): this workflow is the
+# one place a repository secret (SOCKET_SECURITY_API_KEY) is in scope, so we pin
+# every action to an immutable commit SHA — a compromised mutable tag here would
+# run attacker code with the secret available. Bump the SHAs deliberately.
+#
+# API key: add SOCKET_SECURITY_API_KEY as a repo (or org) Actions secret. Create
+# one at https://docs.socket.dev/docs/create-socket-api-key-for-cicd.
+#
+# Fork PRs: `pull_request` does NOT expose secrets to PRs from forks, so the
+# scan step is guarded to run only when the key is present. Same-repo branches
+# and pushes get the full scan; fork PRs skip it silently rather than failing.
+# We deliberately avoid `pull_request_target` (it would run untrusted fork code
+# with the secret in scope — the classic CI secret-exfiltration footgun).
+name: Socket
+
+on:
+  push:
+  pull_request:
+
+# Least privilege: the scan only reads the checkout. The Socket CLI posts its
+# findings to the Socket dashboard via the API key, not via GITHUB_TOKEN, so no
+# write scopes are needed here.
+permissions:
+  contents: read
+
+jobs:
+  socket-scan:
+    name: socket supply-chain scan
+    runs-on: ubuntu-latest
+    # Lift the secret to job scope so the step-level `if` below can test whether
+    # it is present (a step's own `env:` is not visible to its own `if`).
+    env:
+      SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install Socket CLI
+        run: pip install --disable-pip-version-check socketsecurity
+      - name: Socket scan
+        # Skip when the secret is absent (fork PRs): the key is not exposed to
+        # forked-repo pull requests, and the CLI cannot authenticate without it.
+        if: ${{ env.SOCKET_SECURITY_API_KEY != '' }}
+        env:
+          GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: socketcli

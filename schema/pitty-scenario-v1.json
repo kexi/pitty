@@ -1,0 +1,213 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/kexi/ptytest/schema/ptytest-scenario-v1.json",
+  "title": "ptytest scenario (v1)",
+  "description": "Stable scenario input format for ptytest 1.x. Hand-written to match the deserialized wire form; see SCHEMA.md and COMPATIBILITY.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {
+    "version": {
+      "description": "Scenario format version. Optional; omitted means 1. This ptytest supports version 1 only.",
+      "type": "integer",
+      "const": 1
+    },
+    "name": {
+      "description": "Human-readable scenario name.",
+      "type": "string"
+    },
+    "variables": {
+      "description": "Values for ${var} expansion. Each entry is a plain string or a secret mapping.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/varSpec" }
+    },
+    "env": {
+      "description": "Environment variables injected into every spawned process.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "workspace": { "$ref": "#/definitions/workspace" },
+    "matrix": {
+      "description": "Matrix axes; cells are the Cartesian product. Run with `ptytest matrix`.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/step" }
+    }
+  },
+  "definitions": {
+    "varSpec": {
+      "oneOf": [
+        {
+          "description": "A plain (non-secret) value.",
+          "type": "string"
+        },
+        {
+          "description": "A secret value, masked in reports/logs/annotations.",
+          "type": "object",
+          "required": ["value", "secret"],
+          "properties": {
+            "value": { "type": "string" },
+            "secret": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "workspace": {
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "description": "Working directory relative to the scenario file. Ignored when temp is true.",
+          "type": "string",
+          "default": "."
+        },
+        "temp": {
+          "description": "Run in a fresh 0700 temp directory.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "duration": {
+      "description": "A duration string such as `2s` or `500ms`.",
+      "type": "string"
+    },
+    "source": {
+      "description": "Where an assertion reads text/JSON from: the bare string `output`, or a {file: path} mapping.",
+      "oneOf": [
+        { "type": "string", "enum": ["output"] },
+        {
+          "type": "object",
+          "required": ["file"],
+          "properties": { "file": { "type": "string" } }
+        }
+      ]
+    },
+    "matchSpec": {
+      "type": "object",
+      "required": ["contains"],
+      "properties": {
+        "contains": { "type": "string" },
+        "timeout": { "$ref": "#/definitions/duration" }
+      }
+    },
+    "expectNotSpec": {
+      "description": "expect_not is immediate and never waits, so it takes no timeout (unlike expect/expect_regex). additionalProperties is false so an editor flags a stray timeout; the runner ignores any extra field rather than erroring (forward compatibility).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contains"],
+      "properties": {
+        "contains": { "type": "string" }
+      }
+    },
+    "filePathSpec": {
+      "type": "object",
+      "required": ["path"],
+      "properties": { "path": { "type": "string" } }
+    },
+    "fileContainsSpec": {
+      "type": "object",
+      "required": ["path", "contains"],
+      "properties": {
+        "path": { "type": "string" },
+        "contains": { "type": "string" }
+      }
+    },
+    "step": {
+      "description": "A one-key map naming the step kind. Exactly one of these keys must be present.",
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "spawn": {
+          "oneOf": [
+            { "type": "string" },
+            {
+              "type": "object",
+              "required": ["command"],
+              "properties": {
+                "command": { "type": "string" },
+                "cwd": { "type": "string" },
+                "env": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                }
+              }
+            }
+          ]
+        },
+        "send": { "type": "string" },
+        "send_raw": { "type": "string" },
+        "key": {
+          "description": "A named key, matched case-insensitively after trimming surrounding whitespace (so `Enter`, `ENTER`, `Ctrl+C` all work). Recognized names: enter, tab, escape (alias esc), backspace, up, down, left, right, ctrl+c, ctrl+d, ctrl+z.",
+          "type": "string",
+          "pattern": "(?i)^\\s*(enter|tab|escape|esc|backspace|up|down|left|right|ctrl\\+[cdz])\\s*$"
+        },
+        "wait": { "$ref": "#/definitions/duration" },
+        "expect": { "$ref": "#/definitions/matchSpec" },
+        "expect_regex": {
+          "type": "object",
+          "required": ["pattern"],
+          "properties": {
+            "pattern": { "type": "string" },
+            "timeout": { "$ref": "#/definitions/duration" }
+          }
+        },
+        "expect_not": { "$ref": "#/definitions/expectNotSpec" },
+        "expect_file_exists": { "$ref": "#/definitions/filePathSpec" },
+        "expect_file_contains": { "$ref": "#/definitions/fileContainsSpec" },
+        "expect_file_not_contains": { "$ref": "#/definitions/fileContainsSpec" },
+        "expect_file_changed": { "$ref": "#/definitions/filePathSpec" },
+        "expect_exit": {
+          "oneOf": [
+            { "type": "integer" },
+            {
+              "type": "object",
+              "required": ["code"],
+              "properties": {
+                "code": { "type": "integer" },
+                "timeout": { "$ref": "#/definitions/duration" }
+              }
+            }
+          ]
+        },
+        "expect_running": { "type": "boolean" },
+        "expect_json": {
+          "description": "Requires `path` and exactly one of equals/contains/exists.",
+          "type": "object",
+          "required": ["path"],
+          "properties": {
+            "path": { "type": "string" },
+            "equals": {},
+            "contains": { "type": "string" },
+            "exists": { "type": "boolean" },
+            "source": { "$ref": "#/definitions/source" },
+            "timeout": { "$ref": "#/definitions/duration" }
+          }
+        },
+        "expect_snapshot": {
+          "type": "object",
+          "required": ["file"],
+          "properties": {
+            "file": { "type": "string" },
+            "raw": { "type": "boolean", "default": false }
+          }
+        },
+        "expect_semantic": {
+          "type": "object",
+          "required": ["text", "similarity"],
+          "properties": {
+            "text": { "type": "string" },
+            "similarity": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+            "source": { "$ref": "#/definitions/source" }
+          }
+        }
+      }
+    }
+  }
+}

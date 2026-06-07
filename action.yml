@@ -1,0 +1,165 @@
+# Composite action: run pitty scenarios in a GitHub Actions workflow.
+#
+# Usage:
+#   - uses: kexi/pitty@v1            # floating major tag; pin @main or a SHA
+#                                      # before the first release has run
+#     with:
+#       scenario: e2e/scenarios/positive
+#
+# pitty detects GITHUB_ACTIONS=true and emits a step summary plus failure
+# annotations automatically, so no extra flag is required here. The step's exit
+# code is the verdict (0 pass / 1 assertion / 2 scenario / 3 process).
+#
+# RELEASE NOTE (read before tagging v1.x): the default `version` input below is
+# `v1`, the floating major tag the release automation (.github/workflows/
+# release.yml) creates and force-moves on every `v1.x.y` tag push. That release
+# also publishes `pitty-v1-<os>-<arch>.tar.gz` assets to the `v1` release, so
+# this default both resolves the source fallback (`cargo install --git --tag v1`)
+# AND hits the prebuilt fast path. ORDERING: `@v1` only works after the first
+# release (v1.1.0) has run and created the `v1` tag + assets; before that, pin
+# `@main` or a SHA. Why not keep the default `main`: once `v1` exists it is the
+# stable, prebuilt-backed ref consumers should get by default. The release
+# checklist in COMPATIBILITY.md tracks the tag/asset creation order.
+name: pitty
+description: Run pitty PTY-based CLI testing scenarios.
+branding:
+  icon: terminal
+  color: purple
+
+inputs:
+  scenario:
+    description: Path to a scenario file or a directory of scenarios.
+    required: true
+  command:
+    description: pitty subcommand to run (run, matrix, or bench).
+    required: false
+    default: run
+  args:
+    description: Extra arguments appended to the pitty invocation.
+    required: false
+    default: ""
+  version:
+    description: >-
+      pitty ref to install. Selects both the prebuilt-binary release asset
+      (`pitty-<version>-<os>-<arch>.tar.gz`) and the `cargo install --git`
+      source fallback ref. Defaults to `v1`, the floating major tag the release
+      automation maintains; pin a specific tag (e.g. `v1.1.0`) or SHA to lock a
+      version. Note `v1` only resolves after the first release publishes it.
+    required: false
+    default: v1
+
+runs:
+  using: composite
+  steps:
+    # A Rust toolchain is needed for the cargo-install fallback below. If a
+    # prebuilt binary is found, this still runs but is cheap (toolchain is
+    # commonly cached on the runner).
+    - name: Set up Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    # Install pitty. Prefer a prebuilt binary from GitHub Releases when one
+    # exists for this OS/arch (fast path, published by
+    # .github/workflows/release.yml for each v1.x.y tag), and fall back to
+    # `cargo install --git` from source for refs without a prebuilt binary.
+    #
+    # The fallback branch is intentional and forward-compatible: when release
+    # automation lands in a later v1.x, the prebuilt path activates with no
+    # change required from action consumers.
+    - name: Install pitty
+      shell: bash
+      env:
+        PITTY_REF: ${{ inputs.version }}
+        PITTY_REPO: https://github.com/kexi/pitty
+      run: |
+        set -euo pipefail
+
+        if command -v pitty >/dev/null 2>&1; then
+          echo "pitty already on PATH: $(command -v pitty)"
+          exit 0
+        fi
+
+        os="$(uname -s)"
+        arch="$(uname -m)"
+        asset="pitty-${PITTY_REF}-${os}-${arch}.tar.gz"
+        url="${PITTY_REPO}/releases/download/${PITTY_REF}/${asset}"
+
+        # Fast path: prebuilt binary from GitHub Releases, if published.
+        if curl -fsSL -o /tmp/pitty.tar.gz "$url" 2>/dev/null; then
+          echo "Installing prebuilt pitty from ${url}"
+
+          # Verify the tarball against the `.sha256` the release publishes
+          # (upload-rust-binary-action `checksum: sha256`) before extracting, so
+          # a tampered/corrupt download fails loudly instead of running. The
+          # checksum file holds `<hash>  <asset>`; we re-point its filename to
+          # the local copy. Why a fresh file instead of `-c` on the original:
+          # the published name is the asset, not /tmp/pitty.tar.gz. Why both
+          # tools: `sha256sum` is GNU/Linux, `shasum -a 256` is BSD/macOS; the
+          # runner has one or the other. If neither the checksum nor a checker
+          # is available we fail closed rather than skip verification.
+          if curl -fsSL -o /tmp/pitty.tar.gz.sha256 "${url}.sha256" 2>/dev/null; then
+            expected="$(awk '{print $1}' /tmp/pitty.tar.gz.sha256)"
+            if command -v sha256sum >/dev/null 2>&1; then
+              actual="$(sha256sum /tmp/pitty.tar.gz | awk '{print $1}')"
+            elif command -v shasum >/dev/null 2>&1; then
+              actual="$(shasum -a 256 /tmp/pitty.tar.gz | awk '{print $1}')"
+            else
+              echo "No sha256 checker (sha256sum/shasum) available to verify ${asset}" >&2
+              exit 1
+            fi
+            if [ "$expected" != "$actual" ]; then
+              echo "sha256 mismatch for ${asset}: expected ${expected}, got ${actual}" >&2
+              exit 1
+            fi
+            echo "Verified sha256 of ${asset}"
+          else
+            echo "No ${asset}.sha256 published; refusing to install unverified prebuilt binary" >&2
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/pitty.tar.gz -C "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/pitty"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          exit 0
+        fi
+
+        # Fallback: build from source. The cargo `--git` flag that selects a ref
+        # is ref-kind-specific (`--tag` only matches an annotated/lightweight
+        # TAG, `--branch` only a BRANCH); passing the wrong one fails even when
+        # the ref exists. Why not just always pass `--tag`: the default ref is
+        # `main`, a branch, and a future consumer may pin a SHA — so we resolve
+        # what the ref actually is against the remote first and pass the matching
+        # flag, instead of guessing. `git ls-remote` needs no clone.
+        echo "No prebuilt binary at ${url}; installing from source via cargo."
+        if git ls-remote --tags "${PITTY_REPO}" "refs/tags/${PITTY_REF}" \
+             | grep -q .; then
+          ref_flag="--tag"
+        elif git ls-remote --heads "${PITTY_REPO}" "refs/heads/${PITTY_REF}" \
+               | grep -q .; then
+          ref_flag="--branch"
+        else
+          # Not a tag or branch: treat it as a commit SHA (cargo's `--rev`). This
+          # also makes a totally unresolvable ref fail loudly inside cargo with a
+          # clear "object not found" rather than silently building the default.
+          ref_flag="--rev"
+        fi
+        echo "Resolved ref '${PITTY_REF}' as ${ref_flag}; installing from source."
+
+        # --locked uses the committed Cargo.lock; retry without it in case the
+        # lockfile is stale for the resolved ref.
+        cargo install --git "${PITTY_REPO}" "${ref_flag}" "${PITTY_REF}" --locked pitty \
+          || cargo install --git "${PITTY_REPO}" "${ref_flag}" "${PITTY_REF}" pitty
+
+    - name: Run pitty
+      shell: bash
+      env:
+        PITTY_COMMAND: ${{ inputs.command }}
+        PITTY_SCENARIO: ${{ inputs.scenario }}
+        PITTY_ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+        # GITHUB_ACTIONS=true is set by the runner, so pitty emits the step
+        # summary and annotations on its own. word-splitting on PITTY_ARGS is
+        # intended so callers can pass multiple flags.
+        # shellcheck disable=SC2086
+        pitty "${PITTY_COMMAND}" "${PITTY_SCENARIO}" ${PITTY_ARGS}

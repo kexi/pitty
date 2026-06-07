@@ -1,0 +1,27 @@
+# Dogfood: expect_json over a real PTY. A shell prints a JSON object after some
+# log noise; expect_json must extract the tail JSON block and assert on it via
+# the dotted path grammar (equals, contains, exists). Proves tail-block
+# extraction and path navigation work end to end when pitty runs itself.
+name: expect-json
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  # Emit a line of noise, then a single-line JSON object. The expect below
+  # ensures the JSON has been written before the assertions read the buffer.
+  - send: 'echo "LOG: starting"; echo "{\"status\": \"ok\", \"items\": [1,2,3], \"message\": \"token expired\"}"'
+  - expect:
+      contains: status
+      timeout: 10s
+  - expect_json:
+      path: status
+      equals: ok
+  - expect_json:
+      path: items.0
+      equals: 1
+  - expect_json:
+      path: message
+      contains: expired
+  - expect_json:
+      path: items
+      exists: true

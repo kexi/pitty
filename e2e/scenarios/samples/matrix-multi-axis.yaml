@@ -1,0 +1,22 @@
+# Multi-axis matrix dogfood sample: the Cartesian product of two axes.
+#
+# Two axes (`command` and `region`) of two values each expand to 4 cells —
+# every (command, region) combination. Each cell injects both `${command}` and
+# `${region}` into a single shell line, so the assertion stays shared while the
+# spawned line varies per cell. Cell order is deterministic: axes in
+# lexicographic key order (command, region), later axis varying fastest:
+# (echo,us), (echo,eu), (printf,us), (printf,eu).
+#
+# Run with: pitty matrix e2e/scenarios/samples/matrix-multi-axis.yaml
+name: matrix-multi-axis
+workspace:
+  temp: true
+matrix:
+  command: ["echo", "printf"]
+  region: ["us", "eu"]
+steps:
+  - spawn: bash
+  - send: "${command} matched-${region}"
+  - expect:
+      contains: "matched-"
+      timeout: 10s
