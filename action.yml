@@ -10,16 +10,18 @@
 # annotations automatically, so no extra flag is required here. The step's exit
 # code is the verdict (0 pass / 1 assertion / 2 scenario / 3 process).
 #
-# RELEASE NOTE (read before tagging v1.x): the default `version` input below is
+# RELEASE NOTE (read before tagging v1.x.y): the default `version` input below is
 # `v1`, the floating major tag the release automation (.github/workflows/
 # release.yml) creates and force-moves on every `v1.x.y` tag push. That release
 # also publishes `pitty-v1-<runner-os>-<runner-arch>.tar.gz` assets to the `v1`
 # release, so this default both resolves the source fallback (`cargo install
-# --git --tag v1`) AND hits the prebuilt fast path. ORDERING: `@v1` only works
-# after the first release (v1.1.0) has run and created the `v1` tag + assets;
-# before that, pin `@main` or a SHA. Why not keep the default `main`: once `v1`
-# exists it is the stable, prebuilt-backed ref consumers should get by default.
-# The release checklist in COMPATIBILITY.md tracks the tag/asset creation order.
+# --git --tag v1`) AND hits the prebuilt fast path. The workflow also maintains
+# a floating minor ref (e.g. `v1.2`) and matching assets for callers that want to
+# stay within a minor line. ORDERING: `@v1` only works after the first release
+# (v1.1.0) has run and created the `v1` tag + assets; before that, pin `@main`
+# or a SHA. Why not keep the default `main`: once `v1` exists it is the stable,
+# prebuilt-backed ref consumers should get by default. The release checklist in
+# COMPATIBILITY.md tracks the tag/asset creation order.
 #
 # `name` is the GitHub Marketplace listing name and must be globally unique — it
 # cannot match an existing action, user, or org. Plain `pitty` collides with the
@@ -49,9 +51,10 @@ inputs:
       pitty ref to install. Selects both the prebuilt-binary release asset
       (`pitty-<version>-<runner-os>-<runner-arch>.tar.gz`) and the `cargo
       install --git` source fallback ref. Defaults to `v1`, the floating major
-      tag the release automation maintains; pin a specific tag (e.g. `v1.1.0`)
-      or SHA to lock a version. Note `v1` only resolves after the first release
-      publishes it.
+      tag the release automation maintains; use a floating minor tag (e.g.
+      `v1.2`) to stay on one minor line, pin a specific patch tag (e.g.
+      `v1.2.0`) to lock a version, or pin a SHA. Note `v1` only resolves after
+      the first release publishes it.
     required: false
     default: v1
 

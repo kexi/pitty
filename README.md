@@ -564,14 +564,16 @@ compilation), and falls back to `cargo install --git` from source when no
 prebuilt asset exists for that platform. The release automation
 ([`.github/workflows/release.yml`](.github/workflows/release.yml)) publishes
 prebuilt binaries for Linux (X64, ARM64), macOS (ARM64), and Windows (X64) on
-every release and keeps `v1`-named assets in step with the floating `v1` tag, so
-`@v1` gets the fast path on those platforms. The step's exit code is the verdict,
-so a failing scenario fails the job.
+every release and keeps both floating major (`v1`) and minor (`v1.2`) assets in
+step with their tags, so semver-pinned action refs get the fast path on those
+platforms. The step's exit code is the verdict, so a failing scenario fails the
+job.
 
 The action is published to the GitHub Marketplace as
 [**pitty-action**](https://github.com/marketplace/actions/pitty-action) (the
 bare name `pitty` is taken by an unrelated GitHub user; the Marketplace listing
-name does not affect how you reference it — always `uses: kexi/pitty@v1`).
+name does not affect how you reference it — use `kexi/pitty@v1`,
+`kexi/pitty@v1.2`, or a patch tag such as `kexi/pitty@v1.2.0`).
 
 When pitty detects `GITHUB_ACTIONS=true` (or you pass `--github`) it emits two
 extra outputs alongside its normal stdout:

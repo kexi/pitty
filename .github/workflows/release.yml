@@ -1,12 +1,19 @@
 # Release automation: build prebuilt pitty binaries and publish them to a
-# GitHub Release, then move the floating `v1` major tag and publish a second set
-# of assets named for `v1` so `uses: kexi/pitty@v1` resolves a prebuilt binary.
+# GitHub Release, then move the floating major/minor tags (`v1`, `v1.2`, ...)
+# and publish matching asset sets so action users can pin either stability level
+# while still getting the prebuilt fast path. After the one-time Marketplace
+# publication has been done in the GitHub UI, these published GitHub Releases are
+# the Marketplace update path; GitHub does not expose a separate Marketplace
+# publish API for workflows.
 #
-# Trigger: this runs ONLY on a `v*` tag push (e.g. `v1.1.0`), never on
-# `pull_request`. A release job has `contents: write` and the GITHUB_TOKEN in
-# scope; restricting it to tag pushes from this repo keeps that token away from
-# untrusted fork code (a fork can open a PR but cannot push a tag here), which is
-# why there is deliberately no `pull_request`/`pull_request_target` trigger.
+# Trigger: this workflow wakes up on any `v*` tag push but only publishes for a
+# full patch tag (`vMAJOR.MINOR.PATCH`, e.g. `v1.2.0`). Floating tag moves (`v1`
+# and `v1.2`) re-trigger the workflow, and the parse job deliberately turns all
+# release/upload jobs into no-ops for those refs. A release job has
+# `contents: write` and the GITHUB_TOKEN in scope; restricting it to tag pushes
+# from this repo keeps that token away from untrusted fork code (a fork can open
+# a PR but cannot push a tag here), which is why there is deliberately no
+# `pull_request`/`pull_request_target` trigger.
 #
 # Asset-name contract (the load-bearing detail): action.yml downloads
 #   pitty-${ref}-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz
@@ -30,56 +37,85 @@ on:
       - "v*"
 
 # Least privilege: the only write this workflow needs is creating the GitHub
-# Release and uploading its assets (`contents: write`). It does not need
-# packages, id-token, or any other scope.
+# Release, moving version tags, and uploading assets (`contents: write`). It does
+# not need packages, id-token, or any other scope.
 permissions:
   contents: write
 
 jobs:
-  # Create the GitHub Release for the pushed tag FIRST. upload-rust-binary-action
-  # only attaches assets to an existing release — if none exists it retries and
-  # then fails with "release not found". The four parallel upload jobs would all
-  # race that failure, so one job creates the release up front and they depend on
-  # it. `gh release create` is made idempotent (skip if it already exists) so a
-  # re-run of the workflow does not fail on the second attempt.
+  # Normalize the pushed ref once, then make every publishing job depend on this
+  # single decision. Why not keep a simple expression guard: GitHub Actions has
+  # no regex operator, and `contains(github.ref_name, '.')` would also match the
+  # floating minor tag (`v1.2`) that this workflow force-pushes.
+  release-version:
+    name: parse release tag
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.parse.outputs.should_publish }}
+      major: ${{ steps.parse.outputs.major }}
+      minor: ${{ steps.parse.outputs.minor }}
+    steps:
+      - name: Parse release ref
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            {
+              echo "should_publish=true"
+              echo "major=v${BASH_REMATCH[1]}"
+              echo "minor=v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            } >> "$GITHUB_OUTPUT"
+            echo "Release tag ${tag}; floating refs are v${BASH_REMATCH[1]} and v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}."
+          else
+            {
+              echo "should_publish=false"
+              echo "major="
+              echo "minor="
+            } >> "$GITHUB_OUTPUT"
+            echo "Skipping ${tag}; release automation only publishes vMAJOR.MINOR.PATCH tags."
+          fi
+
+  # Create the GitHub Release for the pushed patch tag FIRST.
+  # upload-rust-binary-action only attaches assets to an existing release — if
+  # none exists it retries and then fails with "release not found". The four
+  # parallel upload jobs would all race that failure, so one job creates the
+  # release up front and they depend on it. If the release already exists, edit
+  # it back to a published/latest release so reruns preserve the Marketplace-
+  # visible patch version instead of letting floating releases become Latest.
   create-release:
     name: create release
-    if: ${{ startsWith(github.ref_name, 'v') && contains(github.ref_name, '.') }}
+    needs: [release-version]
+    if: ${{ needs.release-version.outputs.should_publish == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - name: Create the release if it does not exist
+      - name: Create or refresh the release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           if gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "Release $tag already exists; nothing to create."
+            echo "Release $tag already exists; marking it published and Latest."
+            gh release edit "$tag" --repo "${GITHUB_REPOSITORY}" \
+              --draft=false --prerelease=false --latest
           else
             echo "Creating release $tag"
             gh release create "$tag" --repo "${GITHUB_REPOSITORY}" \
-              --title "$tag" --generate-notes
+              --title "$tag" --generate-notes --latest --verify-tag
           fi
 
-  # Build one prebuilt binary per OS x arch and upload it under BOTH the pushed
-  # tag (e.g. v1.1.0) and the floating `v1` ref. upload-rust-binary-action's
-  # `ref` input selects which release/tag the asset attaches to and feeds the
-  # `$tag` template variable, so the same matrix entry produces, for one target:
-  #   pitty-v1.1.0-<os>-<arch>.tar.gz   (attached to the v1.1.0 release)
-  #   pitty-v1-<os>-<arch>.tar.gz       (attached to the v1 release)
+  # Build one prebuilt binary per OS x arch and upload it under the pushed patch
+  # tag (e.g. v1.2.0). Separate jobs below rebuild the same targets for the
+  # floating major/minor releases because upload-rust-binary-action's `ref`
+  # input selects which release/tag the asset attaches to and feeds the `$tag`
+  # template variable.
   upload-assets:
     name: ${{ matrix.os_name }}-${{ matrix.arch_name }} (${{ matrix.target }})
-    needs: [create-release]
-    # Skip the dotless `v1` push. Why: move-v1-tag force-pushes the floating
-    # `v1` tag, which fires the `v*` trigger a second time with ref_name `v1`.
-    # Without this guard that 2nd run would re-build and re-upload assets named
-    # `pitty-v1-...` (ref_name=v1), colliding with the assets upload-v1-assets
-    # already attached to the `v1` release. The `contains('.')` clause excludes
-    # the dotless `v1` so all three jobs (this, move-v1-tag, upload-v1-assets)
-    # become no-ops on the 2nd push, ending the recursion. `startsWith('v')` is
-    # redundant with the `v*` trigger but kept explicit in case that broadens.
-    if: ${{ startsWith(github.ref_name, 'v') && contains(github.ref_name, '.') }}
+    needs: [release-version, create-release]
+    if: ${{ needs.release-version.outputs.should_publish == 'true' }}
     strategy:
       # Build every target even if one fails, so a single broken cross build
       # does not hide the status of the others.
@@ -123,7 +159,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      # Publish the asset under the pushed tag (e.g. v1.1.0). `archive` is a
+      # Publish the asset under the pushed tag (e.g. v1.2.0). `archive` is a
       # literal name embedding the GitHub runner OS/arch labels (not $target) so
       # it matches action.yml's download URL exactly; `leading-dir: false` places
       # the binary at the tarball root so the action's `tar -xzf -C
@@ -147,71 +183,70 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Move the floating `v1` major tag to this release commit and publish a second
-  # set of assets named for `v1`. This runs after the per-target uploads so the
-  # `v1.1.0` release exists first. The action.yml default `version` input is
-  # `v1`, so without these `v1`-named assets the fast path would 404 and silently
-  # fall back to `cargo install`; the asset-name contract test guards the names.
-  move-v1-tag:
-    name: move v1 tag and publish v1 assets
-    needs: [upload-assets]
+  # Move both floating semver tags to this release commit and create matching
+  # non-Latest GitHub Releases so their prebuilt assets have release targets.
+  # `v1` supports the default `uses: kexi/pitty@v1`; `v1.2` lets users pin to a
+  # minor line per GitHub's action-versioning recommendation.
+  move-floating-tags:
+    name: move floating tags and publish floating releases
+    needs: [release-version, upload-assets]
+    if: ${{ needs.release-version.outputs.should_publish == 'true' }}
     runs-on: ubuntu-latest
-    # Only on a vMAJOR.MINOR.PATCH tag (e.g. v1.1.0), not on the `v1` move below
-    # re-triggering this workflow. Force-pushing `v1` fires another `v*` tag
-    # push; the `contains('.')` clause excludes the dotless `v1` so it does not
-    # recurse into a second v1 move. `startsWith('v')` is redundant with the
-    # `v*` trigger filter but kept as an explicit guard in case that broadens.
-    if: ${{ startsWith(github.ref_name, 'v') && contains(github.ref_name, '.') }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          # Full history so the tag move points at a real commit object.
+          # Full history so the tag moves point at real commit objects.
           fetch-depth: 0
 
-      # Force-move `v1` to the release commit so `uses: kexi/pitty@v1` and
-      # `cargo install --git --tag v1` resolve to this release. The push uses the
-      # workflow GITHUB_TOKEN (contents: write), so no PAT is needed.
-      - name: Move v1 tag to the release commit
+      # Force-move the floating major/minor tags to the release commit so
+      # `uses: kexi/pitty@v1`, `uses: kexi/pitty@v1.2`, and the cargo fallback
+      # all resolve to the same released source. The push uses the workflow
+      # GITHUB_TOKEN (contents: write), so no PAT is needed.
+      - name: Move floating tags to the release commit
+        env:
+          MAJOR_REF: ${{ needs.release-version.outputs.major }}
+          MINOR_REF: ${{ needs.release-version.outputs.minor }}
         run: |
           set -euo pipefail
-          # Derive the major tag from the pushed tag: v1.1.0 -> v1. Why parse the
-          # ref instead of hardcoding `v1`: a future v2.0.0 push reuses this same
-          # job to maintain a `v2` floating tag with no edit.
-          major="$(printf '%s' "${GITHUB_REF_NAME}" | sed -E 's/^(v[0-9]+).*/\1/')"
-          echo "Moving floating major tag ${major} to ${GITHUB_SHA}"
-          git tag -f "${major}" "${GITHUB_SHA}"
-          git push -f origin "refs/tags/${major}"
+          for ref in "$MAJOR_REF" "$MINOR_REF"; do
+            echo "Moving floating tag ${ref} to ${GITHUB_SHA}"
+            git tag -f "${ref}" "${GITHUB_SHA}"
+          done
+          git push -f origin "refs/tags/${MAJOR_REF}" "refs/tags/${MINOR_REF}"
 
-      # Create (or refresh) the `v1` release so upload-v1-assets has a release to
-      # attach to — same "release must exist first" requirement as the tag
-      # release above. If it already exists from a prior v1.x, delete it first so
-      # its assets/notes are regenerated for the new release commit; the moved
-      # `v1` tag is preserved (we only delete the release, not the tag).
-      - name: Create the v1 release
+      # Create (or refresh) the floating releases so the asset upload jobs have
+      # releases to attach to. If a floating release exists from a prior patch,
+      # delete it first so its assets/notes are regenerated for the new commit;
+      # the moved tags are preserved (we only delete releases, not tags).
+      - name: Create floating releases
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAJOR_REF: ${{ needs.release-version.outputs.major }}
+          MINOR_REF: ${{ needs.release-version.outputs.minor }}
         run: |
           set -euo pipefail
-          major="$(printf '%s' "${GITHUB_REF_NAME}" | sed -E 's/^(v[0-9]+).*/\1/')"
-          if gh release view "$major" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            # `gh release delete` keeps the tag by default (only --cleanup-tag
-            # removes it), so the freshly force-moved `v1` tag is preserved.
-            echo "Deleting stale $major release (keeping the tag) before recreating"
-            gh release delete "$major" --repo "${GITHUB_REPOSITORY}" --yes
-          fi
-          echo "Creating $major release at ${GITHUB_SHA}"
-          gh release create "$major" --repo "${GITHUB_REPOSITORY}" \
-            --title "$major" \
-            --notes "Floating major release. Tracks the latest ${major}.x.y; assets mirror the latest tagged release."
+          for ref in "$MAJOR_REF" "$MINOR_REF"; do
+            if gh release view "$ref" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              # `gh release delete` keeps the tag by default (only --cleanup-tag
+              # removes it), so the freshly force-moved tag is preserved.
+              echo "Deleting stale $ref release (keeping the tag) before recreating"
+              gh release delete "$ref" --repo "${GITHUB_REPOSITORY}" --yes
+            fi
+            echo "Creating $ref release at ${GITHUB_SHA}"
+            gh release create "$ref" --repo "${GITHUB_REPOSITORY}" \
+              --title "$ref" --latest=false \
+              --notes "Floating release. Tracks the latest ${ref}.x compatible patch; assets mirror the latest tagged release." \
+              --verify-tag
+          done
 
-  # Build the same targets again, but attach the archives to the `v1`
-  # release under `v1`-named files. A separate matrix job (rather than reusing
-  # upload-assets) because `ref` must point at `v1`, which only exists after
-  # move-v1-tag has run.
-  upload-v1-assets:
-    name: v1 ${{ matrix.os_name }}-${{ matrix.arch_name }} (${{ matrix.target }})
-    needs: [move-v1-tag]
-    if: ${{ startsWith(github.ref_name, 'v') && contains(github.ref_name, '.') }}
+  # Build the same targets again, but attach the archives to the floating major
+  # release under major-named files. A separate matrix job (rather than reusing
+  # upload-assets) because `ref` must point at the floating tag, which only
+  # exists after move-floating-tags has run.
+  upload-major-assets:
+    name: floating major ${{ matrix.os_name }}-${{ matrix.arch_name }} (${{ matrix.target }})
+    needs: [release-version, move-floating-tags]
+    if: ${{ needs.release-version.outputs.should_publish == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -237,20 +272,67 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      # `ref: refs/tags/v1` attaches these assets to the `v1` release and sets
-      # the `$tag` template variable to `v1`; the literal `archive` name encodes
-      # `v1` plus the runner OS/arch labels, matching the action's default
-      # `version: v1` download URL. `leading-dir: false` keeps the binary at the
-      # tarball root (see the release-tag step for why this is pinned, not left
-      # to the action default).
-      - name: Upload assets for the v1 tag
+      # `ref` attaches these assets to the floating major release and the
+      # literal `archive` name embeds that same major ref plus runner OS/arch
+      # labels, matching the action's default `version: v1` download URL.
+      - name: Upload assets for the floating major tag
         uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
           bin: pitty
           target: ${{ matrix.target }}
           build-tool: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'cross' || 'cargo' }}
-          ref: refs/tags/v1
-          archive: pitty-v1-${{ matrix.os_name }}-${{ matrix.arch_name }}
+          ref: refs/tags/${{ needs.release-version.outputs.major }}
+          archive: pitty-${{ needs.release-version.outputs.major }}-${{ matrix.os_name }}-${{ matrix.arch_name }}
+          leading-dir: false
+          tar: all
+          zip: none
+          checksum: sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Build the same targets for the floating minor release (`v1.2`, `v2.0`, ...).
+  # This gives Marketplace/Actions users the standard "stay within this minor
+  # line" pin without falling back to a source build.
+  upload-minor-assets:
+    name: floating minor ${{ matrix.os_name }}-${{ matrix.arch_name }} (${{ matrix.target }})
+    needs: [release-version, move-floating-tags]
+    if: ${{ needs.release-version.outputs.should_publish == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            os_name: Linux
+            arch_name: X64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            os_name: Linux
+            arch_name: ARM64
+          # No macOS Intel target — see the upload-assets matrix for why.
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            os_name: macOS
+            arch_name: ARM64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            os_name: Windows
+            arch_name: X64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # `ref` attaches these assets to the floating minor release and the
+      # literal `archive` name embeds that same minor ref plus runner OS/arch
+      # labels, so `with: version: v1.2` gets the prebuilt fast path too.
+      - name: Upload assets for the floating minor tag
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
+        with:
+          bin: pitty
+          target: ${{ matrix.target }}
+          build-tool: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'cross' || 'cargo' }}
+          ref: refs/tags/${{ needs.release-version.outputs.minor }}
+          archive: pitty-${{ needs.release-version.outputs.minor }}-${{ matrix.os_name }}-${{ matrix.arch_name }}
           leading-dir: false
           tar: all
           zip: none

@@ -56,14 +56,16 @@ The human-readable renderings (`to_table`, `to_summary`, and the GitHub Actions
 Markdown summaries) are **not** part of the JSON contract and may change freely;
 parse the JSON, not the tables.
 
-## Release checklist (creating a `v1.x` tag)
+## Release checklist (creating a `v1.x.y` tag)
 
-As of v1.2, cutting a release is **automated** by
+Cutting a release is **automated** by
 [`.github/workflows/release.yml`](.github/workflows/release.yml): pushing a
 `v1.x.y` tag builds the four prebuilt binaries (Linux X64/ARM64, macOS ARM64,
-Windows X64), uploads them with checksums, force-moves the floating `v1` tag to
-the release commit, and publishes a parallel `v1`-named asset set. The composite
-action's `version` input therefore defaults to `v1`.
+Windows X64), uploads them with checksums, force-moves the floating `v1` major
+tag and `v1.x` minor tag to the release commit, and publishes parallel
+floating-ref asset sets. The composite action's `version` input therefore
+defaults to `v1`, while callers that want a minor-line pin can set
+`version: v1.x`.
 
 The first release (v1.1.0) has run, so the `v1` tag and assets exist and
 `uses: kexi/pitty@v1` resolves. (Historically, before that first release, `@v1`
@@ -76,15 +78,16 @@ When cutting a release:
 - [ ] Push the release tag (e.g. `v1.2.0`). The release workflow then, on its
       own: creates the GitHub Release, builds the four `OS × arch` binaries,
       uploads `pitty-<tag>-<runner-os>-<runner-arch>.tar.gz` (+ `.sha256`) to
-      the release, force-moves the `v1` tag to the release commit, and publishes
-      the `pitty-v1-<runner-os>-<runner-arch>.tar.gz` asset set to the `v1`
-      release.
-- [ ] Verify the run is green and the eight archives (four per ref: Linux
-      X64/ARM64, macOS ARM64, Windows X64) plus their checksums are attached.
+      the release, force-moves the `v1` and `v1.2` tags to the release commit,
+      and publishes the matching `pitty-v1-...` and `pitty-v1.2-...` asset sets
+      to their floating releases.
+- [ ] Verify the run is green and the twelve archives (four per ref: Linux
+      X64/ARM64, macOS ARM64, Windows X64; refs are `v1.2.0`, `v1`, and `v1.2`)
+      plus their checksums are attached.
       The asset names are
       machine-checked against `action.yml` by
       `tests/release_asset_name_contract.rs`, but a real run also confirms the
-      uploads and the tag move succeeded.
+      uploads and the tag moves succeeded.
 - [ ] Post-push checks that the contract tests cannot cover statically (verify
       on the actual run/assets):
   - [ ] `tar tzf` an uploaded Unix asset shows the `pitty` binary at the
@@ -94,8 +97,9 @@ When cutting a release:
         Windows x64 asset is named `...-Windows-X64.tar.gz`; asset names use
         GitHub `RUNNER_OS`/`RUNNER_ARCH` labels, not Rust target triples or
         Git-Bash `uname` values.
-  - [ ] On the 2nd `v*` push (the `v1` force-move), all four jobs skip
-        (dotless `v1` fails the `contains('.')` guard) — no duplicate upload.
+  - [ ] On the `v*` pushes caused by the `v1`/`v1.2` force-moves, the parse job
+        marks them non-publishable and all publishing jobs skip — no duplicate
+        upload.
   - [ ] A consumer run's "Install pitty" log shows the prebuilt fast path
         (`Installing prebuilt pitty from ...` + `Verified sha256 of ...`),
         not the `cargo install` fallback.
@@ -110,16 +114,12 @@ so the listing can never drift out of a publishable shape. The listing `name` is
 collides with the github.com/pitty user. This is only the listing name — the
 repo and `uses: kexi/pitty@v1` are unaffected.
 
-The **publish step itself cannot be automated** — GitHub exposes no API for it
-and requires accepting the Marketplace Developer Agreement in the web UI. It is
-a **one-time manual action**:
-
-- [ ] After the first release exists, open the release on GitHub and tick
-      **"Publish this Action to the GitHub Marketplace"**, accept the agreement,
-      and pick a category. (Requires the metadata above, which CI already
-      guarantees.)
-- [ ] Once published, **every later release updates the Marketplace listing
-      automatically** — no further manual step per release.
+The initial publish step cannot be automated — GitHub exposes no workflow/API
+switch for it and requires accepting the Marketplace Developer Agreement in the
+web UI. That first publish is already complete for this repository. From here,
+the release workflow's published GitHub Releases (`v1.2.0`, plus the refreshed
+`v1`/`v1.2` floating releases) are the Marketplace update path; no further
+manual Marketplace step is expected per release.
 
 ## What is explicitly out of scope for stability
 
