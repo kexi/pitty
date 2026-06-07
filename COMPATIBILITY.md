@@ -58,7 +58,7 @@ parse the JSON, not the tables.
 
 ## Release checklist (creating a `v1.x` tag)
 
-As of v1.1, cutting a release is **automated** by
+As of v1.2, cutting a release is **automated** by
 [`.github/workflows/release.yml`](.github/workflows/release.yml): pushing a
 `v1.x.y` tag builds the four prebuilt binaries (Linux X64/ARM64, macOS ARM64,
 Windows X64), uploads them with checksums, force-moves the floating `v1` tag to
@@ -73,7 +73,7 @@ When cutting a release:
 
 - [ ] Bump the crate `version` in `Cargo.toml`, refresh `Cargo.lock`, and add a
       `CHANGELOG.md` entry.
-- [ ] Push the release tag (e.g. `v1.1.0`). The release workflow then, on its
+- [ ] Push the release tag (e.g. `v1.2.0`). The release workflow then, on its
       own: creates the GitHub Release, builds the four `OS × arch` binaries,
       uploads `pitty-<tag>-<runner-os>-<runner-arch>.tar.gz` (+ `.sha256`) to
       the release, force-moves the `v1` tag to the release commit, and publishes

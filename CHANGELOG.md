@@ -9,6 +9,29 @@ about the scenario format and the report JSON.
 The pre-1.0 entries below are development milestones, not separately tagged
 releases; only 1.0.0 carries a release date.
 
+## [1.2.0] - 2026-06-07
+
+### Added
+
+- **Native Windows support.** CI now runs on `windows-latest`, compiles and tests
+  the Windows backend, and dogfoods a `cmd.exe` scenario through ConPTY.
+- **Windows prebuilt assets.** Release automation now publishes Windows X64
+  tarballs alongside Linux X64/ARM64 and macOS ARM64, and the composite action
+  installs `pitty.exe` from the prebuilt fast path when available.
+- **Pinned action verification.** CI runs `pinact verify` so GitHub Actions pins
+  and version comments stay enforceable.
+
+### Changed
+
+- **Release asset names now use GitHub runner labels.** Archives are named with
+  `RUNNER_OS`/`RUNNER_ARCH` values (for example `Windows-X64` and `macOS-ARM64`)
+  to match what the composite action can download on each runner.
+
+### Fixed
+
+- **PTY shutdown on Windows.** `PtySession` now closes the master and writer
+  handles before joining the reader thread, avoiding a ConPTY teardown hang.
+
 ## [1.1.0] - 2026-06-07
 
 ### Added
