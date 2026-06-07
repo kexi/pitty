@@ -43,7 +43,7 @@ cargo build --release
 ```
 
 Building pitty itself, the test tiers, and the release process are covered in
-[`docs/development.md`](docs/development.md).
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Quick start
 
@@ -620,7 +620,7 @@ Minimal guards (in place since v0.1):
 
 Working on pitty itself — the dev environment, the test tiers, security
 scanning, and the release process — is documented in
-[`docs/development.md`](docs/development.md).
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
