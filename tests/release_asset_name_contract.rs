@@ -70,6 +70,37 @@ fn action_builds_asset_name_from_runner_labels() {
 }
 
 #[test]
+fn action_defaults_install_ref_to_the_action_ref() {
+    // A caller pinning `uses: kexi/pitty@v1.2` expects the installed binary to
+    // come from the same `v1.2` line, not from the broader `v1` release. Composite
+    // actions must pass `github.action_ref` through `env` before shell code can
+    // read it, so the installer resolves refs in this order: explicit input,
+    // action ref, then historical `v1` fallback only for local actions.
+    assert!(
+        ACTION_YML.contains("PITTY_ACTION_REF: ${{ github.action_ref }}"),
+        "action.yml must pass github.action_ref through env for composite steps"
+    );
+    assert!(
+        ACTION_YML.contains("PITTY_INPUT_REF: ${{ inputs.version }}"),
+        "action.yml must pass the explicit version input through env"
+    );
+    assert!(
+        ACTION_YML.contains(r#"if [ -n "$input_ref" ]; then"#)
+            && ACTION_YML.contains(r#"PITTY_REF="$input_ref""#),
+        "action.yml must let an explicit version input override the action ref"
+    );
+    assert!(
+        ACTION_YML.contains(r#"elif [ -n "$action_ref" ]; then"#)
+            && ACTION_YML.contains(r#"PITTY_REF="$action_ref""#),
+        "action.yml must default the install ref to github.action_ref"
+    );
+    assert!(
+        ACTION_YML.contains(r#"PITTY_REF="v1""#),
+        "action.yml must keep v1 as the fallback for local actions without an action ref"
+    );
+}
+
+#[test]
 fn action_handles_windows_executable_name_inside_tarball() {
     // Windows release archives contain `pitty.exe`, while Unix archives contain
     // `pitty`. The action must chmod the OS-specific extracted filename before
