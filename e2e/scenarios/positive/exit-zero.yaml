@@ -1,0 +1,11 @@
+# Dogfood: exit-code propagation. Mirrors the former tests/e2e.rs
+# `exit_code_assertion_passes`. A child that exits must satisfy expect_exit: 0.
+# The wait gives the shell time to exit before the non-blocking exit poll.
+name: exit-zero
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  - send: exit
+  - wait: 500ms
+  - expect_exit: 0

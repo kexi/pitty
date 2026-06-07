@@ -1,0 +1,6 @@
+# ptytest project configuration.
+#
+# Configuration is intentionally minimal: scenarios are self-contained YAML files
+# under scenarios/. This file is a placeholder for future global settings
+# (default timeouts, shared variables) and documents where scenarios live.
+scenarios_dir: scenarios

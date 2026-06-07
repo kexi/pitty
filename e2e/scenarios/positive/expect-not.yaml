@@ -1,0 +1,14 @@
+# Dogfood: expect_not over a real PTY. Mirrors the former tests/e2e.rs
+# `expect_not_passes_when_pattern_absent_over_pty`. After echoing `ok`,
+# asserting `error` is absent must pass.
+name: expect-not
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  - send: echo ok
+  - expect:
+      contains: ok
+      timeout: 10s
+  - expect_not:
+      contains: error

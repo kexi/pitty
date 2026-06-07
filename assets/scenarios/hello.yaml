@@ -1,0 +1,20 @@
+name: hello-world
+# Variables are expanded as ${name} in send/send_raw/spawn payloads.
+variables:
+  greeting: hello
+env:
+  LANG: C
+workspace:
+  # Run inside a fresh 0700 temp directory that is removed on completion.
+  temp: true
+steps:
+  - spawn: bash
+  - send: echo ${greeting} world
+  - expect:
+      contains: hello world
+      timeout: 10s
+  - send: exit
+  # Give the shell a moment to exit before checking its status; expect_exit
+  # polls (it does not block on the child), so a tiny wait avoids a race.
+  - wait: 500ms
+  - expect_exit: 0

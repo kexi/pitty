@@ -1,0 +1,13 @@
+# Dogfood: expect_regex plus a named key. Mirrors the former tests/e2e.rs
+# `expect_regex_with_key_enter_over_pty`. Typing a line without a terminator
+# then pressing Enter must let a regex match the echoed output.
+name: regex-key
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  - send_raw: "echo grep-target-123"
+  - key: enter
+  - expect_regex:
+      pattern: "grep-target-[0-9]+"
+      timeout: 10s

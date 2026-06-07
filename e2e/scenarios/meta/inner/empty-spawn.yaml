@@ -1,0 +1,9 @@
+# Dogfood inner: an empty spawn command, which must surface as a process error
+# (exit 3) rather than spawning an empty program. The outer
+# verify-empty-spawn-errors.yaml asserts that exit code. Mirrors the former
+# tests/e2e.rs `empty_spawn_command_is_process_error`.
+name: empty-spawn
+workspace:
+  temp: true
+steps:
+  - spawn: "   "

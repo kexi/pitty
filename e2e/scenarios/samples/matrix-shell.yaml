@@ -1,0 +1,19 @@
+# Matrix dogfood sample: run the same scenario once per shell command.
+#
+# `matrix` is a general-purpose feature with no AI-tool dependency: the axis
+# values here are ordinary shell command lines. Each value is injected into the
+# same-named `${command}` variable before the run, so the spawned line varies
+# per cell while the assertions stay shared.
+#
+# Run with: ptytest matrix e2e/scenarios/samples/matrix-shell.yaml
+name: matrix-shell
+workspace:
+  temp: true
+matrix:
+  command: ["echo matched", "printf 'matched\\n'"]
+steps:
+  - spawn: bash
+  - send: "${command}"
+  - expect:
+      contains: matched
+      timeout: 10s

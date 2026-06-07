@@ -1,0 +1,13 @@
+# Dogfood: output larger than the reader's READ_CHUNK (4096 bytes). Mirrors the
+# former tests/e2e.rs `long_output_beyond_read_chunk_matches_trailing_needle`.
+# A sentinel after ~6000 'A's must still match, proving chunks append
+# contiguously.
+name: long-output
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  - send: printf 'A%.0s' $(seq 1 6000); printf 'SENTINEL_END\n'
+  - expect:
+      contains: SENTINEL_END
+      timeout: 10s

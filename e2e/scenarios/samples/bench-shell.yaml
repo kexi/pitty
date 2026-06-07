@@ -1,0 +1,22 @@
+# Bench dogfood sample: repeat a deterministic shell scenario to observe its
+# duration distribution and confirm it is not flaky. AI-tool-independent.
+#
+# Run with the defaults (10 runs, 0 warmup):
+#   ptytest bench e2e/scenarios/samples/bench-shell.yaml
+# Add `--runs N --warmup M` to override; a warmup is worth setting only when the
+# first iteration pays a one-time cost (cache/JIT priming) that would skew the
+# distribution — this trivial echo has none, so the defaults suffice.
+name: bench-shell
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  - send: echo hello
+  - expect:
+      contains: hello
+      timeout: 10s
+  # Drive the shell to a clean exit and assert it, so each measured run
+  # exercises the success path end-to-end rather than leaving the child running.
+  - send: exit
+  - wait: 500ms
+  - expect_exit: 0

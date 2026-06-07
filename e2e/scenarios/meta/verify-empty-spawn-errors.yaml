@@ -1,0 +1,28 @@
+# Dogfood meta (nested PTY): the outer ptytest spawns an inner ptytest on a
+# scenario whose spawn command is empty, and asserts the inner process exits 3
+# (process error). Replaces the former tests/e2e.rs
+# `empty_spawn_command_is_process_error`.
+#
+# ${PTYTEST_BIN} / ${INNER_DIR} are resolved from the parent process env by the
+# ${var} expansion fallback in src/workspace.rs::expand. See
+# verify-timeout-fails.yaml for the full rationale, including why this tier does
+# not use workspace.temp.
+# exit code 3 alone cannot distinguish the targeted empty-spawn failure from an
+# environment fault (missing binary, openpty/kill failure), and a literal
+# unresolved ${PTYTEST_BIN} would itself spawn-fail into exit 3 — a false PASS.
+# The `expect` below pins the inner error to its actual message ("empty spawn
+# command", from src/pty/mod.rs PtySession::spawn), which the inner ptytest
+# prints to stderr; in a PTY stderr mixes into the master output captured here.
+# That makes the assertion fail loudly if PTYTEST_BIN/INNER_DIR were unset (the
+# spawn would not produce this message), closing the false-negative (B-1) gap.
+name: verify-empty-spawn-errors
+steps:
+  - spawn: ${PTYTEST_BIN} run ${INNER_DIR}/empty-spawn.yaml
+  - expect:
+      contains: "empty spawn command"
+      timeout: 10s
+  # Poll for the inner exit up to the deadline rather than a fixed wait, so a
+  # slow PTY teardown (notably on macOS) cannot race the judgement.
+  - expect_exit:
+      code: 3
+      timeout: 10s

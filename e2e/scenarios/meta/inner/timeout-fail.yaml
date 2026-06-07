@@ -1,0 +1,13 @@
+# Dogfood inner: an expect that times out on output that never appears. This
+# scenario is meant to FAIL (exit 1); the outer verify-timeout-fails.yaml spawns
+# ptytest on it and asserts that failing exit code. Mirrors the former
+# tests/e2e.rs `expect_times_out_on_absent_output`.
+name: timeout-fail
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  - send: echo hello
+  - expect:
+      contains: this-never-appears
+      timeout: 1s
