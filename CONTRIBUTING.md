@@ -1,7 +1,7 @@
-# Development
+# Contributing to pitty
 
 Contributor- and maintainer-facing docs for working **on** pitty. If you just
-want to *use* pitty to test your CLI, the [README](../README.md) is what you
+want to *use* pitty to test your CLI, the [README](README.md) is what you
 want.
 
 ## Dev environment
@@ -25,7 +25,7 @@ runner. Run `just` (no args) to list recipes:
 | `just lint` / `just fmt` | `cargo fmt --check` + `clippy -D warnings` / auto-format |
 | `just run <path>` / `just matrix <file>` / `just bench <file> [runs]` | drive pitty |
 | `just dogfood` | run all three dogfood tiers (see below) |
-| `just vibe-e2e [vibe_bin]` | E2E the external `vibe` CLI (see [`examples/vibe`](../examples/vibe)) |
+| `just vibe-e2e [vibe_bin]` | E2E the external `vibe` CLI (see [`examples/vibe`](examples/vibe)) |
 | `just ci` | reproduce the full CI gate set locally |
 
 The dev shell installs the [lefthook](https://github.com/evilmartians/lefthook)
@@ -50,7 +50,7 @@ pitty tests itself by running `pitty run` over the scenarios in `e2e/`:
   by design and asserts their exit codes (and secret masking);
 - a **`samples/`** tier exercises the `matrix` and `bench` subcommands.
 
-See [`e2e/README.md`](../e2e/README.md) for the tiers and the
+See [`e2e/README.md`](e2e/README.md) for the tiers and the
 `PITTY_BIN` / `INNER_DIR` environment-variable convention.
 
 ```sh
@@ -65,7 +65,7 @@ CI runs these tiers plus the residual `#[ignore]` PTY tests on **both Linux and
 macOS as required gates** via `nix develop`, so a macOS PTY regression blocks
 merges. The meta tier asserts inner exit via `expect_exit`'s deadline form so the
 macOS gate stays non-flaky despite slower PTY teardown. See
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Locally, `just dogfood`
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Locally, `just dogfood`
 runs all three tiers and `just ci` reproduces the full gate set.
 
 ## Security scanning
@@ -75,13 +75,13 @@ Two scanners guard the repository:
 - **Secret scanning (gitleaks).** A pre-commit hook (via lefthook, installed
   automatically by the nix dev shell) runs `gitleaks git --staged` on every
   commit, so a secret is caught before it lands. The authoritative gate is the
-  `gitleaks` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml),
+  `gitleaks` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml),
   which scans full history on push (and the PR range on pull requests) — the hook
   is bypassable with `git commit --no-verify`, so CI is the backstop. Both read
-  the in-repo [`.gitleaks.toml`](../.gitleaks.toml), which extends gitleaks'
+  the in-repo [`.gitleaks.toml`](.gitleaks.toml), which extends gitleaks'
   default ruleset and deliberately ships no broad allowlist.
 - **Supply-chain scanning (Socket).** A separate [Socket](https://socket.dev)
-  workflow ([`.github/workflows/socket.yml`](../.github/workflows/socket.yml))
+  workflow ([`.github/workflows/socket.yml`](.github/workflows/socket.yml))
   scans the dependency manifest (`Cargo.toml`) for malicious or risky crates. It
   needs a `SOCKET_SECURITY_API_KEY` repository (or org) Actions secret; without
   it the scan step is skipped (so pull requests from forks, which cannot see the
@@ -91,17 +91,17 @@ Two scanners guard the repository:
 ## Releasing
 
 Cutting a release is automated by
-[`.github/workflows/release.yml`](../.github/workflows/release.yml): pushing a
+[`.github/workflows/release.yml`](.github/workflows/release.yml): pushing a
 `v1.x.y` tag creates the GitHub Release, builds the three prebuilt binaries
 (Linux x86_64/aarch64, macOS arm64), uploads them with checksums, force-moves the
 floating `v1` tag to the release commit, and publishes a parallel `v1`-named
 asset set. The full step-by-step checklist (including the post-push verification
 and the one-time GitHub Marketplace publish) lives in
-[`COMPATIBILITY.md`](../COMPATIBILITY.md).
+[`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ## Further reading
 
-- [`SCHEMA.md`](../SCHEMA.md) — the full scenario-format specification.
-- [`COMPATIBILITY.md`](../COMPATIBILITY.md) — SemVer policy + release checklist.
-- [`CHANGELOG.md`](../CHANGELOG.md) — version history.
-- [`e2e/README.md`](../e2e/README.md) — the dogfood test tiers.
+- [`SCHEMA.md`](SCHEMA.md) — the full scenario-format specification.
+- [`COMPATIBILITY.md`](COMPATIBILITY.md) — SemVer policy + release checklist.
+- [`CHANGELOG.md`](CHANGELOG.md) — version history.
+- [`e2e/README.md`](e2e/README.md) — the dogfood test tiers.
