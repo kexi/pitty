@@ -499,20 +499,35 @@ workspace:
   temp: true
 steps:
   - spawn: bash
-  # Probe for a leaked file from a prior run, then create it for this run. Each
-  # command is a separate line so the PTY echoes and the verdict line is its own
-  # output; `wait` lets the shell finish before the assertions read the buffer.
-  - send: "test -e leaked.txt && echo LEAK || echo CLEAN"
+  # Probe for a leaked file from a prior run. The verdict token is BUILT at
+  # runtime (`VERDICT_` + the `ls` exit status word) so the success string
+  # `VERDICT_absent` never appears literally in the command line — the matcher
+  # therefore matches the command's OUTPUT, not the PTY echo of the input. A
+  # leaked file makes `ls` succeed and prints `VERDICT_present`, failing the
+  # expect; a fresh temp dir prints `VERDICT_absent`.
+  - send: "ls leaked.txt >/dev/null 2>&1 && s=present || s=absent; echo VERDICT_$s"
   - expect:
-      contains: CLEAN
+      contains: VERDICT_absent
       timeout: 5s
-  - send: "echo prior > leaked.txt"
-  - wait: 300ms
+  # Write a marker whose token (`MARKER_payload`) does not appear in this command
+  # line, so the read-back expect below cannot match the PTY echo of the write.
+  - send: "printf 'MARKER_%s\\n' payload > leaked.txt"
+  # Confirm the write actually landed by reading it back through the PTY: the
+  # matcher waits up to the timeout, so this is not a fixed-sleep race. The token
+  # only appears in the file's CONTENT (not in the `cat` command echo), so a match
+  # proves the write completed. Once seen, the file is guaranteed present for
+  # expect_file_exists and the shell is idle so the exit below is clean —
+  # important on macOS, whose PTY teardown is slower and made a fixed `wait` flake.
+  - send: "cat leaked.txt"
+  - expect:
+      contains: MARKER_payload
+      timeout: 5s
   - expect_file_exists:
       path: leaked.txt
   - send: exit
-  - wait: 300ms
-  - expect_exit: 0
+  - expect_exit:
+      code: 0
+      timeout: 5s
 "#;
     let scenario = Scenario::from_yaml(yaml).unwrap();
     let report = run_bench(&scenario, Path::new("."), &RunOptions::default(), 3, 0).unwrap();
