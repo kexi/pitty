@@ -1,14 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/kexi/ptytest/schema/ptytest-scenario-v1.json",
-  "title": "ptytest scenario (v1)",
-  "description": "Stable scenario input format for ptytest 1.x. Hand-written to match the deserialized wire form; see SCHEMA.md and COMPATIBILITY.md.",
+  "$id": "https://github.com/kexi/pitty/schema/pitty-scenario-v1.json",
+  "title": "pitty scenario (v1)",
+  "description": "Stable scenario input format for pitty 1.x. Hand-written to match the deserialized wire form; see SCHEMA.md and COMPATIBILITY.md.",
   "type": "object",
   "additionalProperties": false,
   "required": ["name"],
   "properties": {
     "version": {
-      "description": "Scenario format version. Optional; omitted means 1. This ptytest supports version 1 only.",
+      "description": "Scenario format version. Optional; omitted means 1. This pitty supports version 1 only.",
       "type": "integer",
       "const": 1
     },
@@ -28,7 +28,7 @@
     },
     "workspace": { "$ref": "#/definitions/workspace" },
     "matrix": {
-      "description": "Matrix axes; cells are the Cartesian product. Run with `ptytest matrix`.",
+      "description": "Matrix axes; cells are the Cartesian product. Run with `pitty matrix`.",
       "type": "object",
       "additionalProperties": {
         "type": "array",
