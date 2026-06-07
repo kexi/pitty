@@ -1,0 +1,16 @@
+# Git hooks managed by lefthook (provided by the Nix dev shell, see flake.nix).
+# `lefthook install` runs automatically via the dev shell's shellHook.
+pre-commit:
+  parallel: true
+  commands:
+    # Fast secret scan on staged changes only. gitleaks resolves the staged set
+    # itself (`git --staged`), so no glob/{staged_files} is passed. This is a
+    # convenience tripwire that `git commit --no-verify` can bypass, so a CI
+    # gitleaks job over full history remains the authoritative gate.
+    gitleaks:
+      run: gitleaks git --staged --config .gitleaks.toml --redact --no-banner
+    # Keep formatting consistent with the CI lint gate. Only staged Rust files
+    # are checked; a failure means `cargo fmt` was not run before committing.
+    rustfmt:
+      glob: "*.rs"
+      run: cargo fmt --check

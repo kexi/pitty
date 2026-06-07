@@ -1,0 +1,26 @@
+# Secret-scanning config consumed by gitleaks. The pre-commit hook
+# (lefthook.yml, using the Nix dev-shell gitleaks) scans staged changes; the CI
+# `gitleaks` job scans the full git history and points at this file via
+# GITLEAKS_CONFIG.
+#
+# This in-repo config does not by itself stop a PR from weakening the ruleset
+# (gitleaks reads whatever .gitleaks.toml is in the tree). Treat that as an
+# operational concern: protect this file via review/branch protection and keep
+# the CI gitleaks check required before merge.
+
+# Inherit gitleaks' built-in ruleset (AWS keys, GitHub tokens, private keys,
+# generic high-entropy secrets, etc.).
+[extend]
+useDefault = true
+
+# Allowlist policy (why there is no project-level allowlist):
+# - A bare global `regexes`/`paths` allowlist applies to EVERY scanned file, so
+#   exempting a value or a containing path would silently blind the scanner to a
+#   real secret pasted into that file later.
+# - The project ships no lock files with hash-shaped tokens that trip the
+#   scanner (Cargo.lock is gitignored), so there is nothing to suppress.
+# - This repo intentionally contains a few *fake* secrets in test fixtures and
+#   docs (e.g. `supersecretvalue`, `secret-token`) that demonstrate pitty's
+#   masking. They are low-entropy literals the default ruleset does not flag; if
+#   a future fixture ever does trip a rule, add a narrowly scoped allowlist for
+#   that exact value here — never exclude a whole path.
