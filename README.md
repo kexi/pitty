@@ -9,6 +9,15 @@ A PTY-based CLI testing framework.
 and stdin, and verifies streamed output, file changes, and process behavior —
 all driven by declarative YAML scenarios.
 
+> [!WARNING]
+> **`pitty` is NOT production ready.** It is an early, experimental project that
+> has not been battle-tested on real-world workloads. Although the **scenario
+> format** carries a SemVer stability promise (see [`COMPATIBILITY.md`](COMPATIBILITY.md)),
+> the tool itself may still have rough edges, breaking changes, and unhandled
+> edge cases. Use it at your own risk, and pin an exact version if you depend on
+> it. The `1.x` version number tracks the scenario-format contract, **not**
+> production maturity.
+
 ## Why a PTY?
 
 Many CLI tools and interactive agents behave differently when attached to a
