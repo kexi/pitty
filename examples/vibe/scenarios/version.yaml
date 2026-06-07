@@ -1,0 +1,15 @@
+# vibe --version: prints the version banner and exits 0.
+# VIBE_BIN is resolved from the parent environment (pitty's ${var} fallback),
+# so this scenario is portable across machines.
+name: vibe-version
+steps:
+  - spawn: "${VIBE_BIN} --version"
+  - expect:
+      contains: "vibe 1."
+      timeout: 5s
+  - expect:
+      contains: "Platform:"
+      timeout: 5s
+  - expect_exit:
+      code: 0
+      timeout: 5s

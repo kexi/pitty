@@ -3,9 +3,10 @@
 /result.*
 Cargo.lock
 
-# Per-scenario logs emitted by dogfood runs under e2e/ (write_log writes to the
+# Per-scenario logs emitted when running scenarios (write_log writes to the
 # scenario's own directory). Keep the scenarios tracked, ignore their output.
 e2e/**/logs/
+examples/**/logs/
 
 # direnv
 .direnv

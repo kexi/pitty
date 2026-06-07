@@ -1,0 +1,30 @@
+# vibe start --dry-run: inside a throwaway git repo, dry-run prints the
+# git worktree command it WOULD run without making changes, and exits 0.
+# Uses a fresh 0700 temp workspace so the repo it creates is disposable.
+name: vibe-start-dry-run
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  # Build a minimal git repo in the temp workspace.
+  - send: "git init -q && git commit -q --allow-empty -m init && echo REPO_READY"
+  - expect:
+      contains: REPO_READY
+      timeout: 10s
+  # Dry-run a worktree creation: no side effects, just the plan.
+  - send: "${VIBE_BIN} start feat/dryrun-probe --dry-run"
+  - expect:
+      contains: "[dry-run]"
+      timeout: 10s
+  - expect:
+      contains: "git worktree add"
+      timeout: 5s
+  # Confirm the branch was NOT actually created (dry-run made no changes).
+  - send: "git branch --list feat/dryrun-probe | grep -q . && echo BRANCH_EXISTS || echo NO_BRANCH"
+  - expect:
+      contains: NO_BRANCH
+      timeout: 5s
+  - send: exit
+  - expect_exit:
+      code: 0
+      timeout: 5s

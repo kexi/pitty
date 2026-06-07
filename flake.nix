@@ -26,6 +26,7 @@
           buildInputs = [
             rustToolchain
             pkgs.pkg-config
+            pkgs.just
           ];
         };
       });

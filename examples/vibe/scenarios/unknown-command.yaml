@@ -1,0 +1,11 @@
+# vibe <unknown>: an unrecognized subcommand prints "Unknown command" and
+# exits non-zero (exit 1). Negative-path coverage: the tool rejects bad input.
+name: vibe-unknown-command
+steps:
+  - spawn: "${VIBE_BIN} bogus-subcommand-xyz"
+  - expect:
+      contains: "Unknown command"
+      timeout: 5s
+  - expect_exit:
+      code: 1
+      timeout: 5s

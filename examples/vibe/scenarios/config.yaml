@@ -1,0 +1,10 @@
+# vibe config: shows the settings file path and JSON, exits 0. Read-only.
+name: vibe-config
+steps:
+  - spawn: "${VIBE_BIN} config"
+  - expect:
+      contains: "Settings file:"
+      timeout: 5s
+  - expect_exit:
+      code: 0
+      timeout: 5s
