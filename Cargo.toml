@@ -1,20 +1,20 @@
 [package]
-name = "ptytest"
+name = "pitty"
 version = "1.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "PTY-based E2E testing framework for CLI apps and AI agents, driven by YAML scenarios"
-repository = "https://github.com/kexi/ptytest"
+description = "PTY-based CLI testing framework"
+repository = "https://github.com/kexi/pitty"
 readme = "README.md"
 keywords = ["pty", "e2e", "testing", "cli", "terminal"]
 categories = ["command-line-utilities", "development-tools::testing"]
 
 [[bin]]
-name = "ptytest"
+name = "pitty"
 path = "src/main.rs"
 
 [lib]
-name = "ptytest"
+name = "pitty"
 path = "src/lib.rs"
 
 [dependencies]

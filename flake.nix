@@ -1,5 +1,5 @@
 {
-  description = "ptytest - PTY-based E2E testing framework";
+  description = "pitty - PTY-based CLI testing framework";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

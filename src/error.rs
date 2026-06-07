@@ -6,14 +6,14 @@
 
 use thiserror::Error;
 
-/// Top-level error type for ptytest.
+/// Top-level error type for pitty.
 ///
-/// Each variant maps to a distinct exit code (see [`PtytestError::exit_code`]).
+/// Each variant maps to a distinct exit code (see [`PittyError::exit_code`]).
 /// Fallible operations across the crate produce this concrete enum directly so
 /// the exit-code mapping is exhaustive; we deliberately do not use `anyhow`,
 /// whose erased `Error` would obscure which severity class an error belongs to.
 #[derive(Debug, Error)]
-pub enum PtytestError {
+pub enum PittyError {
     /// An assertion within a scenario did not hold: an `expect` mismatch, a
     /// timeout, EOF before a match, a file assertion failure, or an exit-code
     /// mismatch. Maps to exit code 1.
@@ -31,7 +31,7 @@ pub enum PtytestError {
     Process(String),
 }
 
-impl PtytestError {
+impl PittyError {
     /// The exit code associated with this error class.
     ///
     /// Codes are chosen so callers can distinguish "your app behaved wrong"
@@ -39,9 +39,9 @@ impl PtytestError {
     /// (3).
     pub fn exit_code(&self) -> u8 {
         match self {
-            PtytestError::AssertionFailed(_) => 1,
-            PtytestError::Scenario(_) => 2,
-            PtytestError::Process(_) => 3,
+            PittyError::AssertionFailed(_) => 1,
+            PittyError::Scenario(_) => 2,
+            PittyError::Process(_) => 3,
         }
     }
 }
@@ -67,8 +67,8 @@ pub fn severity(code: u8) -> u8 {
 }
 
 /// Result alias used across the crate for fallible operations that ultimately
-/// surface as a [`PtytestError`].
-pub type Result<T> = std::result::Result<T, PtytestError>;
+/// surface as a [`PittyError`].
+pub type Result<T> = std::result::Result<T, PittyError>;
 
 #[cfg(test)]
 mod tests {
@@ -77,9 +77,9 @@ mod tests {
     #[test]
     fn exit_codes_map_per_class() {
         // Each error class must map to its documented exit code.
-        assert_eq!(PtytestError::AssertionFailed("x".into()).exit_code(), 1);
-        assert_eq!(PtytestError::Scenario("x".into()).exit_code(), 2);
-        assert_eq!(PtytestError::Process("x".into()).exit_code(), 3);
+        assert_eq!(PittyError::AssertionFailed("x".into()).exit_code(), 1);
+        assert_eq!(PittyError::Scenario("x".into()).exit_code(), 2);
+        assert_eq!(PittyError::Process("x".into()).exit_code(), 3);
     }
 
     #[test]

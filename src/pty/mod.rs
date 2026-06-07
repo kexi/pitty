@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::error::PtytestError;
+use crate::error::PittyError;
 
 pub use matcher::{wait_for, ExpectOutcome, Matcher};
 use reader::OutputBufferHandle;
@@ -40,7 +40,7 @@ impl PtySession {
     /// The first whitespace-separated token is the program; the remainder are
     /// arguments. `cwd` sets the working directory and `env` injects extra
     /// environment variables. PTY/spawn failures classify as
-    /// [`PtytestError::Process`] (exit code 3).
+    /// [`PittyError::Process`] (exit code 3).
     ///
     /// Argument splitting is plain `split_whitespace`: it does NOT honor shell
     /// quoting or escapes, so a program path containing spaces or an argument
@@ -48,11 +48,7 @@ impl PtySession {
     /// token. We avoid a shell-quoting parser in v0.1 to keep spawning
     /// dependency-free and predictable; wrap such a command in an explicit shell
     /// (`spawn: sh -c '...'`) if you need shell semantics.
-    pub fn spawn(
-        command: &str,
-        cwd: &Path,
-        env: &[(String, String)],
-    ) -> Result<Self, PtytestError> {
+    pub fn spawn(command: &str, cwd: &Path, env: &[(String, String)]) -> Result<Self, PittyError> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -61,12 +57,12 @@ impl PtySession {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| PtytestError::Process(format!("openpty failed: {e}")))?;
+            .map_err(|e| PittyError::Process(format!("openpty failed: {e}")))?;
 
         let mut parts = command.split_whitespace();
         let program = parts
             .next()
-            .ok_or_else(|| PtytestError::Process("empty spawn command".to_string()))?;
+            .ok_or_else(|| PittyError::Process("empty spawn command".to_string()))?;
         let mut builder = CommandBuilder::new(program);
         for arg in parts {
             builder.arg(arg);
@@ -79,16 +75,16 @@ impl PtySession {
         let child = pair
             .slave
             .spawn_command(builder)
-            .map_err(|e| PtytestError::Process(format!("spawn failed: {e}")))?;
+            .map_err(|e| PittyError::Process(format!("spawn failed: {e}")))?;
 
         let reader = pair
             .master
             .try_clone_reader()
-            .map_err(|e| PtytestError::Process(format!("clone reader failed: {e}")))?;
+            .map_err(|e| PittyError::Process(format!("clone reader failed: {e}")))?;
         let writer = pair
             .master
             .take_writer()
-            .map_err(|e| PtytestError::Process(format!("take writer failed: {e}")))?;
+            .map_err(|e| PittyError::Process(format!("take writer failed: {e}")))?;
 
         let output = OutputBufferHandle::new();
         let reader_thread = reader::spawn_reader(reader, output.clone());
@@ -111,26 +107,26 @@ impl PtySession {
     ///
     /// Uses `\r` (not `\n`) because a PTY in canonical mode treats CR as the
     /// line terminator the same way a real Enter keypress does.
-    pub fn send_line(&mut self, text: &str) -> Result<(), PtytestError> {
+    pub fn send_line(&mut self, text: &str) -> Result<(), PittyError> {
         self.write_bytes(text.as_bytes())?;
         self.write_bytes(b"\r")
     }
 
     /// Write raw bytes to stdin with no terminator appended.
-    pub fn send_raw(&mut self, bytes: &[u8]) -> Result<(), PtytestError> {
+    pub fn send_raw(&mut self, bytes: &[u8]) -> Result<(), PittyError> {
         self.write_bytes(bytes)
     }
 
     /// Write a key's resolved byte sequence to stdin.
-    pub fn send_key(&mut self, bytes: &[u8]) -> Result<(), PtytestError> {
+    pub fn send_key(&mut self, bytes: &[u8]) -> Result<(), PittyError> {
         self.write_bytes(bytes)
     }
 
-    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), PtytestError> {
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), PittyError> {
         self.writer
             .write_all(bytes)
             .and_then(|()| self.writer.flush())
-            .map_err(|e| PtytestError::Process(format!("write to pty failed: {e}")))
+            .map_err(|e| PittyError::Process(format!("write to pty failed: {e}")))
     }
 
     /// Block until `matcher` matches new output, or `timeout`/EOF intervenes.
@@ -150,11 +146,11 @@ impl PtySession {
     }
 
     /// Poll whether the child has exited; returns its exit code if so.
-    pub fn try_exit_code(&mut self) -> Result<Option<i32>, PtytestError> {
+    pub fn try_exit_code(&mut self) -> Result<Option<i32>, PittyError> {
         match self.child.try_wait() {
             Ok(Some(status)) => Ok(Some(status.exit_code() as i32)),
             Ok(None) => Ok(None),
-            Err(e) => Err(PtytestError::Process(format!("try_wait failed: {e}"))),
+            Err(e) => Err(PittyError::Process(format!("try_wait failed: {e}"))),
         }
     }
 
@@ -177,7 +173,7 @@ impl PtySession {
     pub fn wait_exit_code_until(
         &mut self,
         deadline: std::time::Instant,
-    ) -> Result<Option<i32>, PtytestError> {
+    ) -> Result<Option<i32>, PittyError> {
         // Poll cadence: short enough to observe a fresh exit promptly, long
         // enough to avoid a busy loop. PTY teardown is on the order of tens of
         // milliseconds, so 10ms keeps observation tight without spinning.
@@ -202,15 +198,15 @@ impl PtySession {
     /// via [`Self::try_exit_code`] (a scenario waits for exit explicitly with a
     /// `wait`/`expect` step). This blocking variant is retained as part of the
     /// public library surface for embedders driving a `PtySession` directly.
-    pub fn wait_exit_code(&mut self) -> Result<i32, PtytestError> {
+    pub fn wait_exit_code(&mut self) -> Result<i32, PittyError> {
         self.child
             .wait()
             .map(|status| status.exit_code() as i32)
-            .map_err(|e| PtytestError::Process(format!("wait failed: {e}")))
+            .map_err(|e| PittyError::Process(format!("wait failed: {e}")))
     }
 
     /// Whether the child is still running.
-    pub fn is_running(&mut self) -> Result<bool, PtytestError> {
+    pub fn is_running(&mut self) -> Result<bool, PittyError> {
         Ok(self.try_exit_code()?.is_none())
     }
 
@@ -223,13 +219,13 @@ impl PtySession {
     ///
     /// Called from `Drop`, but exposed so the runner can tear down explicitly
     /// and surface a kill failure as a process error when it matters.
-    pub fn shutdown(&mut self) -> Result<(), PtytestError> {
+    pub fn shutdown(&mut self) -> Result<(), PittyError> {
         // Kill only if still running; killing an already-exited child is a
         // no-op we would rather not surface as an error.
         if matches!(self.child.try_wait(), Ok(None)) {
             self.child
                 .kill()
-                .map_err(|e| PtytestError::Process(format!("failed to kill child: {e}")))?;
+                .map_err(|e| PittyError::Process(format!("failed to kill child: {e}")))?;
             let _ = self.child.wait();
         }
         // Dropping the writer/master closes the PTY so the reader thread sees

@@ -4,7 +4,7 @@
 //! CI or sandboxed environments may lack a usable PTY; run them explicitly
 //! with `cargo test -- --ignored` where a PTY is available.
 //!
-//! Fallback status: the framework now dogfoods itself via `ptytest run` over
+//! Fallback status: the framework now dogfoods itself via `pitty run` over
 //! the scenarios in `e2e/scenarios/` (positive tier in `positive/`, nested-PTY
 //! "meta" tier in `meta/`). The five positive cases that used to live here have
 //! moved to `e2e/scenarios/positive/` and were removed from this file. The
@@ -36,12 +36,12 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-use ptytest::bench::run_bench;
-use ptytest::config::Scenario;
-use ptytest::matrix::run_matrix;
-use ptytest::report::Status;
-use ptytest::run_scenario;
-use ptytest::runner::RunOptions;
+use pitty::bench::run_bench;
+use pitty::config::Scenario;
+use pitty::matrix::run_matrix;
+use pitty::report::Status;
+use pitty::run_scenario;
+use pitty::runner::RunOptions;
 
 /// Serializes every real-PTY test in this file so at most one is allocating PTYs
 /// at a time.
@@ -176,7 +176,7 @@ steps:
     assert!(report.assertions.iter().any(|a| !a.passed));
 }
 
-/// Dogfood `expect_json` with `source: {file}` against ptytest's OWN JSON
+/// Dogfood `expect_json` with `source: {file}` against pitty's OWN JSON
 /// report: run an inner scenario, persist its report JSON to a file, then have
 /// an outer scenario assert the report's `status` field via `expect_json`.
 ///
@@ -186,7 +186,7 @@ steps:
 /// caught here. It needs a PTY because the inner scenario spawns a real shell.
 #[test]
 #[ignore = "requires a usable PTY"]
-fn expect_json_verifies_ptytest_own_report_from_file() {
+fn expect_json_verifies_pitty_own_report_from_file() {
     let _pty = pty_lock();
     let dir = tempfile::tempdir().unwrap();
 
@@ -231,7 +231,7 @@ steps:
     assert_eq!(outer_report.status, Status::Passed);
     assert!(
         outer_report.assertions.iter().all(|a| a.passed),
-        "expect_json over ptytest's own report must pass: {:?}",
+        "expect_json over pitty's own report must pass: {:?}",
         outer_report.assertions
     );
 }
@@ -406,7 +406,7 @@ steps:
     assert_eq!(verify_report.status, Status::Passed);
     assert!(
         verify_report.assertions.iter().all(|a| a.passed),
-        "expect_json over ptytest's own matrix report must pass: {:?}",
+        "expect_json over pitty's own matrix report must pass: {:?}",
         verify_report.assertions
     );
 }
@@ -438,7 +438,7 @@ steps:
     let err = run_matrix(&scenario, Path::new("."), &RunOptions::default())
         .expect_err("a spawn fault in a cell must abort the matrix as an Err");
     // Process class (3): --no-fail only suppresses the Ok-report assertion path;
-    // the CLI maps this Err straight through PtytestError::exit_code, so the
+    // the CLI maps this Err straight through PittyError::exit_code, so the
     // process exits 3 even with --no-fail.
     assert_eq!(err.exit_code(), 3);
 }
@@ -562,7 +562,7 @@ static GH_ENV_LOCK: Mutex<()> = Mutex::new(());
 /// verdict. Uses a file-only scenario (no spawn) so it needs no PTY.
 #[test]
 fn github_run_writes_masked_markdown_step_summary() {
-    use ptytest::github;
+    use pitty::github;
 
     let _guard = GH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
@@ -589,7 +589,7 @@ steps:
     std::env::remove_var("GITHUB_STEP_SUMMARY");
 
     let body = std::fs::read_to_string(&summary).unwrap();
-    assert!(body.contains("### ptytest: gha-run — PASS"));
+    assert!(body.contains("### pitty: gha-run — PASS"));
     assert!(body.contains("| PASS |"));
     // The secret value must never appear in the summary text.
     assert!(!body.contains("s3cr3t"));
@@ -600,7 +600,7 @@ steps:
 #[test]
 #[ignore = "requires a usable PTY"]
 fn github_matrix_writes_passfail_table_summary() {
-    use ptytest::github;
+    use pitty::github;
 
     let _pty = pty_lock();
     let _guard = GH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -628,19 +628,19 @@ steps:
     std::env::remove_var("GITHUB_STEP_SUMMARY");
 
     let body = std::fs::read_to_string(&summary).unwrap();
-    assert!(body.contains("ptytest matrix"));
+    assert!(body.contains("pitty matrix"));
     assert!(body.contains("| word | Result | Duration |"));
     assert!(body.contains("passed"));
 }
 
-/// Run the ptytest binary once and return its exit code.
+/// Run the pitty binary once and return its exit code.
 ///
 /// `with_github` toggles the `--github` flag. `GITHUB_STEP_SUMMARY` is pointed
 /// at `summary` (an empty temp path) and `GITHUB_ACTIONS` is forced unset, so
 /// the GitHub side effects are exercised in isolation without depending on the
 /// test runner's own CI env. Returns the child's exit code (the verdict).
-fn run_ptytest_exit_code(args: &[&str], with_github: bool, summary: &Path) -> i32 {
-    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ptytest"));
+fn run_pitty_exit_code(args: &[&str], with_github: bool, summary: &Path) -> i32 {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_pitty"));
     cmd.args(args);
     if with_github {
         cmd.arg("--github");
@@ -649,10 +649,10 @@ fn run_ptytest_exit_code(args: &[&str], with_github: bool, summary: &Path) -> i3
     // flag (not an ambient CI env) is the sole driver of the GitHub output.
     cmd.env("GITHUB_STEP_SUMMARY", summary)
         .env_remove("GITHUB_ACTIONS");
-    let status = cmd.status().expect("ptytest binary must launch");
+    let status = cmd.status().expect("pitty binary must launch");
     status
         .code()
-        .expect("ptytest must exit with a code, not a signal")
+        .expect("pitty must exit with a code, not a signal")
 }
 
 /// (G-7) The GitHub output is a pure side effect: emitting it must not change
@@ -677,8 +677,8 @@ fn github_flag_does_not_change_run_exit_code() {
     let summary_on = dir.path().join("on.md");
     let path = scenario.to_str().unwrap();
 
-    let off = run_ptytest_exit_code(&["run", path], false, &summary_off);
-    let on = run_ptytest_exit_code(&["run", path], true, &summary_on);
+    let off = run_pitty_exit_code(&["run", path], false, &summary_off);
+    let on = run_pitty_exit_code(&["run", path], true, &summary_on);
 
     assert_eq!(off, 1, "the absent-file assertion must fail (exit 1)");
     assert_eq!(
@@ -728,8 +728,8 @@ steps:
     let summary_on = dir.path().join("on.md");
     let path = scenario.to_str().unwrap();
 
-    let off = run_ptytest_exit_code(&["matrix", path], false, &summary_off);
-    let on = run_ptytest_exit_code(&["matrix", path], true, &summary_on);
+    let off = run_pitty_exit_code(&["matrix", path], false, &summary_off);
+    let on = run_pitty_exit_code(&["matrix", path], true, &summary_on);
 
     assert_eq!(off, 1, "a failing cell drives the matrix verdict to 1");
     assert_eq!(

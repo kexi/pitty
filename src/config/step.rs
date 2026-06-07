@@ -283,7 +283,7 @@ impl MatchSpec {
 /// runner to ever read a timeout for `expect_not`. Why not also
 /// `deny_unknown_fields` to reject a stray `timeout` outright: the forward-
 /// compatibility policy (see `Scenario`/`COMPATIBILITY.md`) keeps spec types
-/// lenient so a scenario authored for a newer 1.x parses on an older ptytest;
+/// lenient so a scenario authored for a newer 1.x parses on an older pitty;
 /// a stray `timeout` is therefore ignored here, and the JSON schema flags it for
 /// authors via `additionalProperties: false`.
 #[derive(Debug, Clone, Deserialize)]
@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn expect_not_ignores_a_stray_timeout_rather_than_erroring() {
         // (S-1) expect_not takes no timeout. A scenario that writes one (e.g.
-        // authored for a hypothetical newer ptytest, or by mistake) must still
+        // authored for a hypothetical newer pitty, or by mistake) must still
         // parse — the field is silently ignored, not rejected — preserving the
         // forward-compatibility policy that keeps step specs lenient. The schema
         // (additionalProperties: false) is what flags it for the author.

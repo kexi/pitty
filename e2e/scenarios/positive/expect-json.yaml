@@ -1,7 +1,7 @@
 # Dogfood: expect_json over a real PTY. A shell prints a JSON object after some
 # log noise; expect_json must extract the tail JSON block and assert on it via
 # the dotted path grammar (equals, contains, exists). Proves tail-block
-# extraction and path navigation work end to end when ptytest runs itself.
+# extraction and path navigation work end to end when pitty runs itself.
 name: expect-json
 workspace:
   temp: true

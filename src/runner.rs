@@ -14,7 +14,7 @@ use crate::assert::file::FileSnapshots;
 use crate::assert::semantic::{LexicalBackend, SemanticBackend};
 use crate::assert::{self, AssertionResult};
 use crate::config::{Scenario, Source, Step};
-use crate::error::PtytestError;
+use crate::error::PittyError;
 use crate::pty::reader::OutputBufferHandle;
 use crate::pty::{Matcher, PtySession};
 use crate::report::{Report, Status};
@@ -76,15 +76,15 @@ impl std::fmt::Debug for RunOptions {
 /// Returns:
 /// - `Ok(report)` with `status` Passed/Failed for normal completion (including
 ///   assertion failures, which are not errors but failures).
-/// - `Err(PtytestError)` for process/scenario faults that prevented the run
+/// - `Err(PittyError)` for process/scenario faults that prevented the run
 ///   from completing; the caller maps these to exit codes via
-///   `PtytestError::exit_code` (the report on this path is logged but not
+///   `PittyError::exit_code` (the report on this path is logged but not
 ///   returned, so no status is emitted for a hard fault).
 pub fn run_scenario(
     scenario: &Scenario,
     base_dir: &Path,
     options: &RunOptions,
-) -> Result<Report, PtytestError> {
+) -> Result<Report, PittyError> {
     let start = Instant::now();
     let workspace = Workspace::prepare(scenario, base_dir)?;
     let mut state = RunState {
@@ -93,7 +93,7 @@ pub fn run_scenario(
         assertions: Vec::new(),
     };
 
-    let mut run_error: Option<PtytestError> = None;
+    let mut run_error: Option<PittyError> = None;
     for step in &scenario.steps {
         // Capture file baselines at spawn time so `expect_file_changed`
         // measures change from the moment the process starts.
@@ -113,7 +113,7 @@ pub fn run_scenario(
 
     // Invariant: a `Status` describes only the pass/fail of a *completed* run.
     // A hard fault (process/scenario) is reported by returning `Err` below, and
-    // its exit-code class lives in `PtytestError::exit_code` — the single source
+    // its exit-code class lives in `PittyError::exit_code` — the single source
     // of truth for fault classes. Why not also stamp the report when `run_error`
     // is set: that report is never observed on the `Err` path (the caller takes
     // the error branch), and a separate "error" status would duplicate, and could
@@ -184,7 +184,7 @@ fn execute_step(
     workspace: &Workspace,
     state: &mut RunState,
     options: &RunOptions,
-) -> Result<(), PtytestError> {
+) -> Result<(), PittyError> {
     let label = step.label();
     match step {
         Step::Spawn(spec) => {
@@ -228,7 +228,7 @@ fn execute_step(
             Ok(())
         }
         Step::ExpectRegex(spec) => {
-            let matcher = Matcher::regex(&spec.pattern).map_err(PtytestError::Scenario)?;
+            let matcher = Matcher::regex(&spec.pattern).map_err(PittyError::Scenario)?;
             let timeout = spec
                 .timeout
                 .map(|d| d.as_duration())
@@ -275,7 +275,7 @@ fn execute_step(
             // it as a Scenario error (exit 2) tells the author to fix the
             // ordering rather than masking it as a failed expectation.
             if !state.snapshots.is_primed(&path) {
-                return Err(PtytestError::Scenario(format!(
+                return Err(PittyError::Scenario(format!(
                     "expect_file_changed for {} has no baseline: it must appear \
                      after a 'spawn' so the file can be snapshotted at spawn time",
                     spec.path
@@ -319,7 +319,7 @@ fn execute_step(
             // authoring error, not a failed expectation: surface it as a Scenario
             // error (exit 2) so the author fixes the YAML.
             if let Some(reason) = &spec.invalid_reason {
-                return Err(PtytestError::Scenario(format!(
+                return Err(PittyError::Scenario(format!(
                     "expect_json '{}': {reason}",
                     spec.path
                 )));
@@ -388,7 +388,7 @@ fn execute_step(
             // 2) so the author fixes the YAML rather than trusting a vacuous pass
             // or chasing an unwinnable fail.
             if !(0.0..=1.0).contains(&spec.similarity) {
-                return Err(PtytestError::Scenario(format!(
+                return Err(PittyError::Scenario(format!(
                     "expect_semantic similarity {} is out of range; it must be within 0.0..=1.0",
                     spec.similarity
                 )));
@@ -466,8 +466,8 @@ fn wait_for_tail_json(output: &OutputBufferHandle, timeout: Duration) -> Option<
 
 /// Build the Scenario error for an unrecognized `source` keyword, shared by the
 /// `expect_json` and `expect_semantic` arms so both reject a typo identically.
-fn invalid_source_error(keyword: &str) -> PtytestError {
-    PtytestError::Scenario(format!(
+fn invalid_source_error(keyword: &str) -> PittyError {
+    PittyError::Scenario(format!(
         "unknown source '{keyword}'; use 'output' (the default) or '{{file: <path>}}'"
     ))
 }
@@ -499,19 +499,19 @@ fn prime_snapshots(scenario: &Scenario, workspace: &Workspace, snapshots: &mut F
 }
 
 /// Borrow the active session immutably, erroring if none was spawned.
-fn session_ref(state: &RunState) -> Result<&PtySession, PtytestError> {
+fn session_ref(state: &RunState) -> Result<&PtySession, PittyError> {
     state
         .session
         .as_ref()
-        .ok_or_else(|| PtytestError::Scenario("step requires a prior 'spawn'".to_string()))
+        .ok_or_else(|| PittyError::Scenario("step requires a prior 'spawn'".to_string()))
 }
 
 /// Borrow the active session mutably, erroring if none was spawned.
-fn session_mut(state: &mut RunState) -> Result<&mut PtySession, PtytestError> {
+fn session_mut(state: &mut RunState) -> Result<&mut PtySession, PittyError> {
     state
         .session
         .as_mut()
-        .ok_or_else(|| PtytestError::Scenario("step requires a prior 'spawn'".to_string()))
+        .ok_or_else(|| PittyError::Scenario("step requires a prior 'spawn'".to_string()))
 }
 
 /// A check outcome reducible to pass/fail plus an optional failure message.
@@ -590,13 +590,11 @@ fn mask_report(report: &mut Report, secrets: &[String]) {
 }
 
 /// Mask secret values inside an error's message before it leaves the runner.
-fn mask_error(err: PtytestError, secrets: &[String]) -> PtytestError {
+fn mask_error(err: PittyError, secrets: &[String]) -> PittyError {
     match err {
-        PtytestError::AssertionFailed(m) => {
-            PtytestError::AssertionFailed(mask_secrets(&m, secrets))
-        }
-        PtytestError::Scenario(m) => PtytestError::Scenario(mask_secrets(&m, secrets)),
-        PtytestError::Process(m) => PtytestError::Process(mask_secrets(&m, secrets)),
+        PittyError::AssertionFailed(m) => PittyError::AssertionFailed(mask_secrets(&m, secrets)),
+        PittyError::Scenario(m) => PittyError::Scenario(mask_secrets(&m, secrets)),
+        PittyError::Process(m) => PittyError::Process(mask_secrets(&m, secrets)),
     }
 }
 
@@ -808,10 +806,10 @@ steps:
         // Scenario error (exit 2) under --update, and must NOT write the file
         // outside the workspace.
         let dir = tempfile::tempdir().unwrap();
-        let outside = dir.path().parent().unwrap().join("ptytest-escape.snap");
+        let outside = dir.path().parent().unwrap().join("pitty-escape.snap");
         // Defensive: ensure no stale file from a prior run.
         let _ = std::fs::remove_file(&outside);
-        let yaml = "name: x\nsteps:\n  - spawn: \"true\"\n  - expect_snapshot:\n      file: ../ptytest-escape.snap\n";
+        let yaml = "name: x\nsteps:\n  - spawn: \"true\"\n  - expect_snapshot:\n      file: ../pitty-escape.snap\n";
         let scenario = Scenario::from_yaml(yaml).unwrap();
         let options = RunOptions {
             update: true,

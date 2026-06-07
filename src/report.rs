@@ -10,7 +10,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::assert::AssertionResult;
-use crate::error::PtytestError;
+use crate::error::PittyError;
 use crate::workspace::mask_secrets;
 
 /// Overall status of a completed scenario run.
@@ -18,10 +18,10 @@ use crate::workspace::mask_secrets;
 /// `lowercase` so JSON consumers see `"passed"` or `"failed"`.
 ///
 /// Why only two variants (no `Error`): a `Status` is only ever produced when a
-/// run *completes* — the runner returns `Err(PtytestError)` for any hard fault
+/// run *completes* — the runner returns `Err(PittyError)` for any hard fault
 /// (process/scenario), so a report's status reflects solely the pass/fail of the
 /// assertions that ran. The exit-code truth for a hard fault lives in
-/// [`PtytestError::exit_code`](crate::error::PtytestError::exit_code), the single
+/// [`PittyError::exit_code`](crate::error::PittyError::exit_code), the single
 /// source of truth for fault classes; baking an `Error` status into the report
 /// would duplicate (and could contradict) that mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -37,7 +37,7 @@ pub enum Status {
 ///
 /// The single authoritative `Status -> u8` table: `Passed` is success (0) and
 /// `Failed` is the assertion class (1). Hard faults never reach here — they are
-/// `Err(PtytestError)` whose `exit_code()` owns the scenario (2) / process (3)
+/// `Err(PittyError)` whose `exit_code()` owns the scenario (2) / process (3)
 /// classes. Both the CLI's `run_one` and the matrix aggregation route through
 /// here so the mapping lives in one exhaustive `match`. Why centralize rather
 /// than inline at each call site: a future `Status` variant would otherwise need
@@ -105,10 +105,10 @@ pub fn write_log(
     output: &str,
     report: &Report,
     secrets: &[String],
-) -> Result<(), PtytestError> {
+) -> Result<(), PittyError> {
     let log_dir = base_dir.join("logs");
     std::fs::create_dir_all(&log_dir)
-        .map_err(|e| PtytestError::Process(format!("cannot create logs dir: {e}")))?;
+        .map_err(|e| PittyError::Process(format!("cannot create logs dir: {e}")))?;
 
     // Sanitize the scenario name into a safe file stem so a crafted name
     // cannot escape the logs directory via path separators.
@@ -135,9 +135,9 @@ pub fn write_log(
     let masked = mask_secrets(&body, secrets);
 
     let mut file = std::fs::File::create(&log_path)
-        .map_err(|e| PtytestError::Process(format!("cannot create log file: {e}")))?;
+        .map_err(|e| PittyError::Process(format!("cannot create log file: {e}")))?;
     file.write_all(masked.as_bytes())
-        .map_err(|e| PtytestError::Process(format!("cannot write log: {e}")))?;
+        .map_err(|e| PittyError::Process(format!("cannot write log: {e}")))?;
     set_log_permissions_0600(&log_path)?;
     Ok(())
 }
@@ -166,14 +166,14 @@ fn sanitize_stem(name: &str) -> String {
 }
 
 #[cfg(unix)]
-fn set_log_permissions_0600(path: &Path) -> Result<(), PtytestError> {
+fn set_log_permissions_0600(path: &Path) -> Result<(), PittyError> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| PtytestError::Process(format!("cannot set log perms: {e}")))
+        .map_err(|e| PittyError::Process(format!("cannot set log perms: {e}")))
 }
 
 #[cfg(not(unix))]
-fn set_log_permissions_0600(_path: &Path) -> Result<(), PtytestError> {
+fn set_log_permissions_0600(_path: &Path) -> Result<(), PittyError> {
     Ok(())
 }
 
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn status_exit_code_is_two_valued() {
         // The Status -> exit-code table is exactly two branches: Passed 0,
-        // Failed 1. Fault classes (2/3) are owned by PtytestError, never Status.
+        // Failed 1. Fault classes (2/3) are owned by PittyError, never Status.
         assert_eq!(status_exit_code(Status::Passed), 0);
         assert_eq!(status_exit_code(Status::Failed), 1);
     }

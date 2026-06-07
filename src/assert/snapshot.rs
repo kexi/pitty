@@ -144,7 +144,7 @@ fn unified_diff(recorded: &str, current: &str) -> String {
 /// behavior is predictable; a faithful last-write-wins normalization is deferred.
 ///
 /// Why not handle 8-bit C1 controls (e.g. a lone `0x9b` as CSI): on the UTF-8
-/// terminals ptytest targets, `0x9b` is a continuation byte of a multibyte
+/// terminals pitty targets, `0x9b` is a continuation byte of a multibyte
 /// character far more often than a real C1 CSI introducer, so treating it as a
 /// control would corrupt legitimate text. Programs emit the 7-bit `ESC [` form
 /// in practice, which is handled above. 8-bit C1 support is deferred to v0.3.

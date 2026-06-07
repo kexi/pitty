@@ -5,7 +5,7 @@
 # same-named `${command}` variable before the run, so the spawned line varies
 # per cell while the assertions stay shared.
 #
-# Run with: ptytest matrix e2e/scenarios/samples/matrix-shell.yaml
+# Run with: pitty matrix e2e/scenarios/samples/matrix-shell.yaml
 name: matrix-shell
 workspace:
   temp: true

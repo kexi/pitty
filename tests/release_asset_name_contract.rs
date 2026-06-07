@@ -2,9 +2,9 @@
 //! workflow must match exactly what the composite action downloads.
 //!
 //! `action.yml` fast-path builds its download URL from
-//!   ptytest-${PTYTEST_REF}-$(uname -s)-$(uname -m).tar.gz
+//!   pitty-${PITTY_REF}-$(uname -s)-$(uname -m).tar.gz
 //! and `.github/workflows/release.yml` names each archive
-//!   ptytest-<ref>-${{ matrix.os_name }}-${{ matrix.arch_name }}.tar.gz
+//!   pitty-<ref>-${{ matrix.os_name }}-${{ matrix.arch_name }}.tar.gz
 //! where `os_name`/`arch_name` are the raw `uname` values supplied per build
 //! matrix entry. If the two drift — most easily by the release matrix naming
 //! Apple Silicon `aarch64` (its Rust triple) instead of `arm64` (its
@@ -28,7 +28,7 @@ const ACTION_YML: &str = include_str!("../action.yml");
 /// The release workflow source, embedded so the test reads what ships.
 const RELEASE_YML: &str = include_str!("../.github/workflows/release.yml");
 
-/// The four `(uname -s, uname -m)` pairs ptytest ships prebuilt binaries for.
+/// The four `(uname -s, uname -m)` pairs pitty ships prebuilt binaries for.
 /// This is the single source of truth both sides are checked against.
 ///
 /// Apple Silicon is `arm64` here (its `uname -m`), deliberately distinct from
@@ -55,21 +55,21 @@ fn action_builds_asset_name_from_raw_uname_values() {
         "action.yml must derive arch from `uname -m`"
     );
     assert!(
-        ACTION_YML.contains(r#"asset="ptytest-${PTYTEST_REF}-${os}-${arch}.tar.gz""#),
+        ACTION_YML.contains(r#"asset="pitty-${PITTY_REF}-${os}-${arch}.tar.gz""#),
         "action.yml asset name expression changed; update UNAME_PAIRS / this gate"
     );
 }
 
 #[test]
 fn release_archive_template_orders_ref_os_arch_to_match_the_action() {
-    // The release archive name must be `ptytest-<ref>-<os>-<arch>` with os/arch
+    // The release archive name must be `pitty-<ref>-<os>-<arch>` with os/arch
     // taken from the matrix's raw uname values, in the same order the action's
     // download URL uses. We check both refs the workflow publishes: the pushed
     // tag (`github.ref_name`, e.g. v1.1.0) and the floating `v1`. A reordered or
     // renamed segment here is the exact drift that silently breaks the fast path.
     let tag_template =
-        "archive: ptytest-${{ github.ref_name }}-${{ matrix.os_name }}-${{ matrix.arch_name }}";
-    let v1_template = "archive: ptytest-v1-${{ matrix.os_name }}-${{ matrix.arch_name }}";
+        "archive: pitty-${{ github.ref_name }}-${{ matrix.os_name }}-${{ matrix.arch_name }}";
+    let v1_template = "archive: pitty-v1-${{ matrix.os_name }}-${{ matrix.arch_name }}";
 
     assert!(
         RELEASE_YML.contains(tag_template),
@@ -153,8 +153,8 @@ fn release_only_triggers_on_tag_push() {
 #[test]
 fn release_pins_leading_dir_false_on_both_upload_steps() {
     // AC6: action.yml extracts the tarball with `tar -xzf -C $HOME/.local/bin`
-    // and then `chmod +x "$HOME/.local/bin/ptytest"`, i.e. it expects the binary
-    // at the tarball ROOT (no `ptytest-.../` subdirectory). That holds only if
+    // and then `chmod +x "$HOME/.local/bin/pitty"`, i.e. it expects the binary
+    // at the tarball ROOT (no `pitty-.../` subdirectory). That holds only if
     // upload-rust-binary-action is told `leading-dir: false`. The action's
     // default is not guaranteed across versions, so release.yml must state it
     // explicitly on BOTH upload steps (release-tag and v1). If the default ever
@@ -170,24 +170,24 @@ fn release_pins_leading_dir_false_on_both_upload_steps() {
         occurrences, 2,
         "release.yml must pin `leading-dir: false` on both the release-tag and v1 \
          upload steps (found {occurrences}); the action expects the binary at the \
-         tarball root for `chmod +x $HOME/.local/bin/ptytest`"
+         tarball root for `chmod +x $HOME/.local/bin/pitty`"
     );
 }
 
 #[test]
 fn release_bin_name_matches_action_chmod_target() {
-    // Binary-name drift guard: release.yml builds `bin: ptytest`, and action.yml
-    // makes the extracted binary executable at `$HOME/.local/bin/ptytest`. With
+    // Binary-name drift guard: release.yml builds `bin: pitty`, and action.yml
+    // makes the extracted binary executable at `$HOME/.local/bin/pitty`. With
     // `leading-dir: false` the tarball root file is named after `bin`, so if the
     // crate's binary is ever renamed in release.yml, action.yml's chmod path
-    // would no longer exist. Pin both to the literal `ptytest`.
+    // would no longer exist. Pin both to the literal `pitty`.
     assert!(
-        RELEASE_YML.contains("bin: ptytest"),
-        "release.yml must build `bin: ptytest` (binary name the action chmods)"
+        RELEASE_YML.contains("bin: pitty"),
+        "release.yml must build `bin: pitty` (binary name the action chmods)"
     );
     assert!(
-        ACTION_YML.contains(r#"chmod +x "$HOME/.local/bin/ptytest""#),
-        "action.yml must chmod `$HOME/.local/bin/ptytest`, matching release.yml `bin: ptytest`"
+        ACTION_YML.contains(r#"chmod +x "$HOME/.local/bin/pitty""#),
+        "action.yml must chmod `$HOME/.local/bin/pitty`, matching release.yml `bin: pitty`"
     );
 }
 
@@ -197,7 +197,7 @@ fn release_jobs_all_guard_against_dotless_v1_repush() {
     // floating `v1` tag, which re-fires the `v*` trigger with ref_name `v1`. All
     // three jobs must carry the `contains(github.ref_name, '.')` guard so that
     // 2nd push is a complete no-op: without it on upload-assets, the 2nd run
-    // would re-upload `ptytest-v1-...` assets and collide with upload-v1-assets.
+    // would re-upload `pitty-v1-...` assets and collide with upload-v1-assets.
     // We assert the full guard expression appears once per job (three times).
     let guard = "if: ${{ startsWith(github.ref_name, 'v') && contains(github.ref_name, '.') }}";
     let occurrences = RELEASE_YML.matches(guard).count();

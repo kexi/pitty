@@ -1,11 +1,11 @@
-# ptytest
+# pitty
 
-[![CI](https://github.com/kexi/ptytest/actions/workflows/ci.yml/badge.svg)](https://github.com/kexi/ptytest/actions/workflows/ci.yml)
-[![Socket](https://github.com/kexi/ptytest/actions/workflows/socket.yml/badge.svg)](https://github.com/kexi/ptytest/actions/workflows/socket.yml)
+[![CI](https://github.com/kexi/pitty/actions/workflows/ci.yml/badge.svg)](https://github.com/kexi/pitty/actions/workflows/ci.yml)
+[![Socket](https://github.com/kexi/pitty/actions/workflows/socket.yml/badge.svg)](https://github.com/kexi/pitty/actions/workflows/socket.yml)
 
-A PTY-based end-to-end testing framework for CLI applications and AI agents.
+A PTY-based CLI testing framework.
 
-`ptytest` runs your program inside a real pseudo-terminal, simulates keystrokes
+`pitty` runs your program inside a real pseudo-terminal, simulates keystrokes
 and stdin, and verifies streamed output, file changes, and process behavior —
 all driven by declarative YAML scenarios.
 
@@ -13,13 +13,13 @@ all driven by declarative YAML scenarios.
 
 Many CLI tools and interactive agents behave differently when attached to a
 real terminal (line editing, color, prompts, paging). Piping stdin/stdout is
-not enough. `ptytest` allocates an actual PTY via
+not enough. `pitty` allocates an actual PTY via
 [`portable-pty`](https://crates.io/crates/portable-pty), so the program under
 test sees a genuine terminal.
 
 ## Install
 
-`ptytest` is a Rust project. With Nix and direnv:
+`pitty` is a Rust project. With Nix and direnv:
 
 ```sh
 direnv allow        # loads the dev shell (rust toolchain via rust-overlay)
@@ -36,11 +36,11 @@ cargo build --release
 ## Quick start
 
 ```sh
-ptytest init                       # scaffold ptytest.yaml + scenarios/hello.yaml
-ptytest list                       # list scenario names under scenarios/ (default)
-ptytest list e2e/                  # list scenario names under any directory
-ptytest run scenarios/hello.yaml   # run a single scenario
-ptytest run scenarios/             # run every *.yaml/*.yml in a directory (name order)
+pitty init                       # scaffold pitty.yaml + scenarios/hello.yaml
+pitty list                       # list scenario names under scenarios/ (default)
+pitty list e2e/                  # list scenario names under any directory
+pitty run scenarios/hello.yaml   # run a single scenario
+pitty run scenarios/             # run every *.yaml/*.yml in a directory (name order)
 ```
 
 Each run prints a JSON report and exits with a code (see [Exit codes](#exit-codes)).
@@ -81,11 +81,11 @@ steps:
 As of `1.0.0` the scenario format is **stable**. The full specification —
 every step, field, the `${var}` rules, and the key set — lives in
 [`SCHEMA.md`](SCHEMA.md), with a machine-readable JSON Schema at
-[`schema/ptytest-scenario-v1.json`](schema/ptytest-scenario-v1.json) for editor
+[`schema/pitty-scenario-v1.json`](schema/pitty-scenario-v1.json) for editor
 autocompletion and validation:
 
 ```yaml
-# yaml-language-server: $schema=./schema/ptytest-scenario-v1.json
+# yaml-language-server: $schema=./schema/pitty-scenario-v1.json
 version: 1                          # optional; omitted means 1
 name: hello-world
 # ...
@@ -95,7 +95,7 @@ A scenario may declare `version: 1` (the default when omitted). A newer version
 this build does not understand is a Scenario error rather than a silent
 mis-parse. Unknown **top-level** keys (e.g. a `stesp:` typo) are also rejected;
 nested step/spec fields stay lenient so a scenario written for a newer `1.x`
-ptytest still runs on an older one. See [`COMPATIBILITY.md`](COMPATIBILITY.md)
+pitty still runs on an older one. See [`COMPATIBILITY.md`](COMPATIBILITY.md)
 for the full SemVer policy on the scenario format and the report JSON, and
 [`CHANGELOG.md`](CHANGELOG.md) for the version history.
 
@@ -108,7 +108,7 @@ for the full SemVer policy on the scenario format and the report JSON, and
 - **`env`** at the top level applies to every `spawn`. A `spawn`'s own `env`
   is merged on top and wins on conflicts.
 - **`${var}`** is resolved in order: (1) scenario `variables`, (2) the **parent
-  process environment** (so `export MY_VAR=value` before `ptytest run` lets a
+  process environment** (so `export MY_VAR=value` before `pitty run` lets a
   scenario reference `${MY_VAR}` — e.g. in `spawn.command` — without editing the
   YAML), (3) the literal `${name}` text if absent from both (so a typo is
   visible in the sent input rather than failing the run). Use `$$` for a literal
@@ -196,7 +196,7 @@ session directly.)
 ```
 
 - **Source.** With no `source` (the default `output`, which may also be written
-  explicitly as `source: output`), ptytest extracts the **last *parseable* JSON
+  explicitly as `source: output`), pitty extracts the **last *parseable* JSON
   block at the tail of the PTY output** — so a final JSON report printed after
   log noise is found, and braces inside string literals are not mistaken for
   structure. With `source: {file: <path>}` it reads and parses that
@@ -205,7 +205,7 @@ session directly.)
   `source` grammar is shared by `expect_semantic`.
   - **Last *parseable*, not last *emitted*.** Extraction returns the last block
     that parses, which is not guaranteed to be the last block the program wrote.
-    If the final report is truncated or malformed, ptytest falls back to an
+    If the final report is truncated or malformed, pitty falls back to an
     earlier complete block (bounded to a window near the tail). **Place the JSON
     report at the very end of output** (nothing after it but a newline) so the
     block you intend is the one extracted; do not rely on extraction to reject a
@@ -233,7 +233,7 @@ session directly.)
   test that requires a string target (other types fail with a type message).
   `exists` passes when the path resolves. Specifying zero or multiple checks is a
   scenario error.
-- **Waiting.** For `source: output`, ptytest polls until a parseable tail JSON
+- **Waiting.** For `source: output`, pitty polls until a parseable tail JSON
   block appears, up to `timeout` (default 30s). It does **not** consume the
   output cursor, so several `expect_json` steps can inspect the same JSON.
   `source: file` is read immediately.
@@ -268,7 +268,7 @@ session directly.)
   assertions are not confined under the single-trust model; only snapshot
   *writes* are.)
 - **Recording / updating** happens only with `--update` (or
-  `PTYTEST_UPDATE_SNAPSHOTS` set to `1`, `true`, or `yes`):
+  `PITTY_UPDATE_SNAPSHOTS` set to `1`, `true`, or `yes`):
   - file absent, no `--update` → **fail** (`not recorded; rerun with --update`).
     A brand-new snapshot is never silently created, so CI cannot pass an
     unreviewed snapshot.
@@ -301,7 +301,7 @@ grammar as `expect_json` (the default `output`, `source: output`, or
 - **`similarity` must be within `0.0..=1.0`.** A threshold outside that range is
   a **scenario error** (exit 2): a value above `1.0` could never pass and a
   negative value would always pass, so rather than silently doing either,
-  ptytest rejects it so the typo is fixed.
+  pitty rejects it so the typo is fixed.
 - **Leave headroom on round thresholds.** The lexical score is a float, so a
   "clean" fraction is not always represented exactly: a case that is intuitively
   "half a match" can score just **under** `0.5`, and an exact `>=` comparison
@@ -322,22 +322,22 @@ grammar as `expect_json` (the default `output`, `source: output`, or
 
 ### Updating snapshots: `--update`
 
-`ptytest run <path> --update` records absent snapshots and overwrites mismatched
+`pitty run <path> --update` records absent snapshots and overwrites mismatched
 ones (then passes), for **every** `expect_snapshot` in the run. The environment
-variable `PTYTEST_UPDATE_SNAPSHOTS` enables the same behavior, so CI or a local
+variable `PITTY_UPDATE_SNAPSHOTS` enables the same behavior, so CI or a local
 shell can opt in globally. It is truthy when set (case-insensitively, after
-trimming) to `1`, `true`, or `yes` — e.g. `PTYTEST_UPDATE_SNAPSHOTS=1`,
-`PTYTEST_UPDATE_SNAPSHOTS=true`, or `PTYTEST_UPDATE_SNAPSHOTS=yes`. Any other
+trimming) to `1`, `true`, or `yes` — e.g. `PITTY_UPDATE_SNAPSHOTS=1`,
+`PITTY_UPDATE_SNAPSHOTS=true`, or `PITTY_UPDATE_SNAPSHOTS=yes`. Any other
 value leaves updating off. Without it, an absent or mismatched snapshot fails.
 
-> **Do not leave `PTYTEST_UPDATE_SNAPSHOTS` enabled in CI.** With updating on,
+> **Do not leave `PITTY_UPDATE_SNAPSHOTS` enabled in CI.** With updating on,
 > every snapshot is rewritten to the current output and passes, which silently
 > disables regression detection. Use `--update` as a one-off, locally, when you
 > have reviewed the change.
 
 ## Matrix: run one scenario across many values
 
-`ptytest matrix <file>` runs a single scenario once per **cell** of a matrix,
+`pitty matrix <file>` runs a single scenario once per **cell** of a matrix,
 comparing implementations or configurations against the same steps. A matrix
 declares one or more **axes**; the cells are the **Cartesian product** of all
 axes. The matrix is a general-purpose mechanism with **no AI-tool dependency**:
@@ -411,9 +411,9 @@ checked independently, so a single bad axis fails the whole matrix:
   process spawns; an oversized product is rejected up front
   (`matrix expands to N cells, exceeding the limit of ...`) rather than starting
   a spawn storm. Raise it for an intentional large sweep by setting
-  `PTYTEST_MATRIX_MAX_CELLS` (an unset or non-numeric value falls back to 256).
-- A scenario with a `matrix:` section run via `ptytest run` is **refused** (use
-  `ptytest matrix`); a scenario without one run via `ptytest matrix` errors
+  `PITTY_MATRIX_MAX_CELLS` (an unset or non-numeric value falls back to 256).
+- A scenario with a `matrix:` section run via `pitty run` is **refused** (use
+  `pitty matrix`); a scenario without one run via `pitty matrix` errors
   (`no matrix section`).
 
 **Snapshots are never recorded or updated by `matrix`.** Each cell only
@@ -421,7 +421,7 @@ checked independently, so a single bad axis fails the whole matrix:
 shares the same snapshot path, so recording would let the last cell clobber the
 others (a write race). A cell whose snapshot is absent therefore **fails**
 (`not recorded; rerun with --update`). Record snapshots once with
-`ptytest run --update`, then gate with `ptytest matrix`.
+`pitty run --update`, then gate with `pitty matrix`.
 
 Output: a column-aligned table by default, or a machine-readable `MatrixReport`
 JSON with `--json`. A single-axis matrix prints `value  PASS/FAIL  (ms)`; a
@@ -435,7 +435,7 @@ run) and still exits with its class (scenario 2 / process 3) even under
 `--no-fail`, because a broken harness is not an "informational" red cell.
 
 ```console
-$ ptytest matrix scenarios/bugfix.yaml
+$ pitty matrix scenarios/bugfix.yaml
 bash-impl    PASS  (1180ms)
 python-impl  FAIL  (1920ms)
 node-impl    PASS  (1340ms)
@@ -446,7 +446,7 @@ $ echo $?
 A multi-axis matrix prints one `key=value …` row per cell:
 
 ```console
-$ ptytest matrix e2e/scenarios/samples/matrix-multi-axis.yaml
+$ pitty matrix e2e/scenarios/samples/matrix-multi-axis.yaml
 command=echo region=us    PASS (2ms)
 command=echo region=eu    PASS (1ms)
 command=printf region=us  PASS (2ms)
@@ -484,12 +484,12 @@ order) plus a `cells` array, where each cell carries its `coords` map (axis name
 
 ## Bench: repeat a scenario to measure timing and flakiness
 
-`ptytest bench <file> [--runs N] [--warmup M]` runs a scenario `warmup + runs`
+`pitty bench <file> [--runs N] [--warmup M]` runs a scenario `warmup + runs`
 times (default `--runs 10 --warmup 0`), discards the warmup iterations, and
 reports duration statistics plus a **pass rate** that surfaces flakiness.
 
 ```console
-$ ptytest bench scenarios/bugfix.yaml --runs 10
+$ pitty bench scenarios/bugfix.yaml --runs 10
 scenario: bugfix
 runs: 10 (0 warmup)
 pass: 9/10  (FLAKY)
@@ -513,7 +513,7 @@ duration_ms: min 1180  median 1340  mean 1402  p95 1980  max 2100  stddev 240
   to the next — runs do not share state.
 - **Snapshots are never recorded or updated by `bench`** (no `--update` flag):
   re-recording across N runs would just keep whichever run wrote last, so an
-  absent snapshot fails. Record once with `ptytest run --update` first.
+  absent snapshot fails. Record once with `pitty run --update` first.
 - `--json` emits a `BenchReport` with the raw `durations` array and nested
   `stats`.
 - Exit code: 0 only when every measured run passed; any assertion failure yields
@@ -525,14 +525,14 @@ duration_ms: min 1180  median 1340  mean 1402  p95 1980  max 2100  stddev 240
 Run scenarios as a step with the bundled composite action:
 
 ```yaml
-- uses: kexi/ptytest@v1                # floating major tag, maintained per release
+- uses: kexi/pitty@v1                # floating major tag, maintained per release
   with:
     scenario: e2e/scenarios/positive   # file or directory
     command: run                       # run (default), matrix, or bench
     args: ""                           # extra flags, e.g. "--no-fail"
 ```
 
-The action installs ptytest and runs it. It prefers a **prebuilt binary** from
+The action installs pitty and runs it. It prefers a **prebuilt binary** from
 the GitHub Release matching the runner's OS/arch (fast: a tarball download, no
 compilation), and falls back to `cargo install --git` from source when no
 prebuilt asset exists for that platform. The release automation
@@ -544,11 +544,11 @@ failing scenario fails the job.
 
 > **Bootstrap note: pin `@main` (or a SHA) only for the very first release.** The
 > `v1` tag and its assets are created by the v1.1.0 release run; until that has
-> happened once, `uses: kexi/ptytest@v1` cannot resolve the action ref. After the
+> happened once, `uses: kexi/pitty@v1` cannot resolve the action ref. After the
 > first release, `@v1` is the recommended ref. See the release checklist in
 > [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
-When ptytest detects `GITHUB_ACTIONS=true` (or you pass `--github`) it emits two
+When pitty detects `GITHUB_ACTIONS=true` (or you pass `--github`) it emits two
 extra outputs alongside its normal stdout:
 
 - a **step summary** appended to `$GITHUB_STEP_SUMMARY` — an assertion table for
@@ -564,7 +564,7 @@ before it can reach the summary, an annotation, or the CI log.
 To preview the output locally without a runner:
 
 ```sh
-GITHUB_STEP_SUMMARY=/tmp/summary.md ptytest matrix scenario.yaml --github
+GITHUB_STEP_SUMMARY=/tmp/summary.md pitty matrix scenario.yaml --github
 cat /tmp/summary.md
 ```
 
@@ -579,7 +579,7 @@ cat /tmp/summary.md
 
 When running multiple scenarios (or matrix cells), the final exit code is the
 most severe outcome: process (3) > scenario (2) > assertion (1) > success (0).
-`ptytest matrix --no-fail` overrides this to always exit 0.
+`pitty matrix --no-fail` overrides this to always exit 0.
 
 ## Logs
 
@@ -589,7 +589,7 @@ registered secret values are replaced with `***` before anything is written.
 
 ## Concurrency model
 
-`ptytest` is synchronous on the surface. Internally, one dedicated reader
+`pitty` is synchronous on the surface. Internally, one dedicated reader
 thread drains the (blocking) PTY master into a shared buffer and notifies a
 `Condvar`; `expect` waits on that condvar so a match is observed the instant
 output arrives, with a bounded timeout. We avoid an async runtime because
@@ -598,7 +598,7 @@ require blocking tasks anyway.
 
 ## Security and trust model
 
-> **ptytest is single-trust (unchanged since v0.1).** You run your own
+> **pitty is single-trust (unchanged since v0.1).** You run your own
 > scenarios in your own environment. Untrusted scenario YAML is **not**
 > supported: a scenario can spawn arbitrary processes and read/write files, so
 > treat scenario files as code you own.
@@ -607,7 +607,7 @@ Minimal guards (in place since v0.1):
 
 - **Temp/log permissions.** `workspace.temp: true` uses `tempfile::TempDir`
   (atomic `mkdtemp`, no self-chosen names) set to `0700`. Logs are `0600`.
-  These are Unix-only modes; `ptytest` targets Unix PTYs.
+  These are Unix-only modes; `pitty` targets Unix PTYs.
 - **Secret masking.** Variables flagged `secret: true` have their literal
   value masked (`***`) in logs and error messages.
 - **Best-effort cleanup.** Temp directories are removed when their `TempDir`
@@ -616,18 +616,18 @@ Minimal guards (in place since v0.1):
 
 ## Dogfooding
 
-`ptytest` tests itself by running `ptytest run` over the scenarios in `e2e/`.
+`pitty` tests itself by running `pitty run` over the scenarios in `e2e/`.
 A `positive/` tier runs scenarios directly, and a nested-PTY `meta/` tier spawns
-an inner `ptytest` on scenarios that fail by design and asserts their exit codes
+an inner `pitty` on scenarios that fail by design and asserts their exit codes
 (and secret masking). See [`e2e/README.md`](e2e/README.md) for the tiers and the
-`PTYTEST_BIN` / `INNER_DIR` environment-variable convention.
+`PITTY_BIN` / `INNER_DIR` environment-variable convention.
 
 ```sh
 nix develop --command cargo build
-export PTYTEST_BIN="$PWD/target/debug/ptytest"
+export PITTY_BIN="$PWD/target/debug/pitty"
 export INNER_DIR="$PWD/e2e/scenarios/meta/inner"
-nix develop --command "$PTYTEST_BIN" run e2e/scenarios/positive   # must exit 0
-nix develop --command "$PTYTEST_BIN" run e2e/scenarios/meta       # must exit 0
+nix develop --command "$PITTY_BIN" run e2e/scenarios/positive   # must exit 0
+nix develop --command "$PITTY_BIN" run e2e/scenarios/meta       # must exit 0
 ```
 
 CI runs these tiers plus the residual `#[ignore]` PTY tests on **both Linux and

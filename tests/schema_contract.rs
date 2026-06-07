@@ -1,23 +1,23 @@
 //! Contract gate: the published JSON schema must stay in lockstep with the
 //! implementation's accepted scenario shapes.
 //!
-//! v1.0 freezes `schema/ptytest-scenario-v1.json` as a stable, hand-written
+//! v1.0 freezes `schema/pitty-scenario-v1.json` as a stable, hand-written
 //! contract. These tests mechanically compare the schema against the
 //! implementation (the `STEP_KEYS`/`KEY_NAMES` constants, themselves pinned to
 //! the deserializer by unit tests) so a step or key added on one side but not
 //! the other is caught at `cargo test` time rather than shipping a schema that
-//! lies about what ptytest accepts.
+//! lies about what pitty accepts.
 //!
 //! The schema is embedded with `include_str!` and parsed with `serde_json`, so
 //! the test reads the exact bytes that ship.
 
 use std::collections::BTreeSet;
 
-use ptytest::config::{KEY_NAMES, STEP_KEYS};
+use pitty::config::{KEY_NAMES, STEP_KEYS};
 use serde_json::Value;
 
 /// The committed schema source, embedded so the test reads exactly what ships.
-const SCHEMA_JSON: &str = include_str!("../schema/ptytest-scenario-v1.json");
+const SCHEMA_JSON: &str = include_str!("../schema/pitty-scenario-v1.json");
 
 /// Parse the embedded schema once.
 fn schema() -> Value {

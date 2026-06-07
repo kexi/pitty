@@ -1,24 +1,24 @@
-# ptytest scenario format (stable, v1)
+# pitty scenario format (stable, v1)
 
-This document specifies the **stable scenario input format** as of ptytest
+This document specifies the **stable scenario input format** as of pitty
 `1.0.0`. A scenario is a single YAML document. Unless noted otherwise, every
 key shown is optional with the stated default.
 
 A machine-readable JSON Schema for editor autocompletion and validation lives
-at [`schema/ptytest-scenario-v1.json`](schema/ptytest-scenario-v1.json). Point
+at [`schema/pitty-scenario-v1.json`](schema/pitty-scenario-v1.json). Point
 your YAML language server at it with a modeline at the top of a scenario file:
 
 ```yaml
-# yaml-language-server: $schema=./schema/ptytest-scenario-v1.json
+# yaml-language-server: $schema=./schema/pitty-scenario-v1.json
 ```
 
 (Use a relative path that resolves to the schema in this repo, or a checked-in
-copy. ptytest does not publish the schema to an external URL.)
+copy. pitty does not publish the schema to an external URL.)
 
 ## Top-level keys
 
 A scenario document accepts exactly these seven keys. **Any other top-level key
-is a Scenario error** (exit code 2): ptytest applies `deny_unknown_fields` at
+is a Scenario error** (exit code 2): pitty applies `deny_unknown_fields` at
 the top level so a typo such as `stesp:` (for `steps:`) fails loudly instead of
 leaving an empty step list that passes vacuously.
 
@@ -29,7 +29,7 @@ leaving an empty step list that passes vacuously.
 | `variables` | map of name → var spec        | `{}`    | Values for `${var}` expansion; a variable may be marked secret. |
 | `env`       | map of string → string        | `{}`    | Environment variables injected into every spawned process. |
 | `workspace` | workspace spec                | `{cwd: ".", temp: false}` | Where commands run. |
-| `matrix`    | map of axis → list of strings | `{}`    | Matrix axes; cells are the Cartesian product (run with `ptytest matrix`). |
+| `matrix`    | map of axis → list of strings | `{}`    | Matrix axes; cells are the Cartesian product (run with `pitty matrix`). |
 | `steps`     | list of steps                 | `[]`    | Ordered steps to execute. |
 
 ### `version`
@@ -39,11 +39,11 @@ supports **version 1 only**. A scenario declaring any other version (e.g.
 `version: 2`) is rejected with a Scenario error:
 
 ```
-unsupported scenario version 2; this ptytest supports version 1 (update ptytest for newer scenarios)
+unsupported scenario version 2; this pitty supports version 1 (update pitty for newer scenarios)
 ```
 
 This is deliberate: silently parsing a newer scenario could drop steps or field
-semantics the new version introduced and report a false pass. Update ptytest to
+semantics the new version introduced and report a false pass. Update pitty to
 run a newer scenario.
 
 ### `variables`
@@ -79,7 +79,7 @@ Values are `${var}`-expanded.
 
 A map from axis name to a non-empty list of string values. Each axis name must
 appear somewhere reachable by `${axis}` expansion (a spawn command, a `send`,
-or an `env`/`spawn.env` value). `ptytest matrix` runs the scenario once per
+or an `env`/`spawn.env` value). `pitty matrix` runs the scenario once per
 element of the Cartesian product of all axes, injecting each cell's values as
 the same-named variables. See the README's *Matrix* section for the full rules.
 
@@ -171,9 +171,9 @@ block to appear). An unrecognized `source` keyword is a Scenario error.
 `deny_unknown_fields` is enforced **only at the top level** (so `stesp:` fails
 loudly). Inside a step or spec, an unrecognized field is **silently ignored**,
 not an error — this is what keeps a scenario authored for a newer `1.x`
-(carrying an additive optional field) parsing on an older ptytest (see
+(carrying an additive optional field) parsing on an older pitty (see
 [`COMPATIBILITY.md`](COMPATIBILITY.md)). The trade-off is that a *typo* inside a
-spec (e.g. `contians:` for `contains:`) is not caught by ptytest at run time;
+spec (e.g. `contians:` for `contains:`) is not caught by pitty at run time;
 rely on the JSON schema (and your editor's YAML language server) to flag it. The
 schema sets `additionalProperties: false` where a spec's field set is closed
 (e.g. `expect_not`), turning such typos into editor warnings.
@@ -200,12 +200,12 @@ An unrecognized key name is a Scenario error.
 
 ## Compatibility (SemVer)
 
-ptytest version `1.0.0` freezes two separate contracts. They are versioned
+pitty version `1.0.0` freezes two separate contracts. They are versioned
 together by the crate version but evolve under distinct rules. See
 [`COMPATIBILITY.md`](COMPATIBILITY.md) for the full statement.
 
 - **Input (this scenario format)** is the stability target. Within `1.x`,
-  ptytest only **adds** optional steps and optional fields. Removing a step or
+  pitty only **adds** optional steps and optional fields. Removing a step or
   field, changing the meaning of one, or making an optional field required is a
   breaking change reserved for `2.0`. A scenario valid under `1.0.0` stays valid
   under every `1.x`.

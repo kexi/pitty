@@ -1,4 +1,4 @@
-# CI for ptytest.
+# CI for pitty.
 #
 # Toolchain comes from the repo's `nix develop` shell (flake-utils +
 # rust-overlay), so every job invokes cargo through `nix develop --command` to
@@ -20,7 +20,7 @@ on: [push, pull_request]
 
 # Least privilege: every job only checks out, builds, and tests — none write
 # back to the repo. Pinning the token to read-only here means the code we build
-# and run (including the nested ptytest the dogfood spawns) cannot use
+# and run (including the nested pitty the dogfood spawns) cannot use
 # GITHUB_TOKEN to mutate the repository even if the default were write.
 permissions:
   contents: read
@@ -71,34 +71,34 @@ jobs:
       - name: cargo build
         run: nix develop --command cargo build
 
-      # Dogfood: run ptytest against its own scenarios. PTYTEST_BIN and INNER_DIR
+      # Dogfood: run pitty against its own scenarios. PITTY_BIN and INNER_DIR
       # are exported here and resolved inside meta scenarios via ${var} expansion
       # (parent-env fallback in src/workspace.rs). Each step's exit code is the
-      # pass/fail gate: a non-zero ptytest exit fails the CI step.
+      # pass/fail gate: a non-zero pitty exit fails the CI step.
       - name: dogfood positive tier
         run: |
-          export PTYTEST_BIN="$PWD/target/debug/ptytest"
+          export PITTY_BIN="$PWD/target/debug/pitty"
           export INNER_DIR="$PWD/e2e/scenarios/meta/inner"
-          # Env-existence guard: the meta tier resolves ${PTYTEST_BIN}/${INNER_DIR}
+          # Env-existence guard: the meta tier resolves ${PITTY_BIN}/${INNER_DIR}
           # from the parent env. If either is unset/missing the placeholders would
           # spawn-fail into exit 3 and the empty-spawn meta case would falsely
           # PASS. Fail loudly here instead.
-          test -x "$PTYTEST_BIN" || { echo "PTYTEST_BIN not executable: $PTYTEST_BIN" >&2; exit 1; }
+          test -x "$PITTY_BIN" || { echo "PITTY_BIN not executable: $PITTY_BIN" >&2; exit 1; }
           test -d "$INNER_DIR" || { echo "INNER_DIR not a directory: $INNER_DIR" >&2; exit 1; }
-          nix develop --command "$PTYTEST_BIN" run e2e/scenarios/positive
+          nix develop --command "$PITTY_BIN" run e2e/scenarios/positive
       - name: dogfood meta tier (nested PTY)
         run: |
-          export PTYTEST_BIN="$PWD/target/debug/ptytest"
+          export PITTY_BIN="$PWD/target/debug/pitty"
           export INNER_DIR="$PWD/e2e/scenarios/meta/inner"
-          test -x "$PTYTEST_BIN" || { echo "PTYTEST_BIN not executable: $PTYTEST_BIN" >&2; exit 1; }
+          test -x "$PITTY_BIN" || { echo "PITTY_BIN not executable: $PITTY_BIN" >&2; exit 1; }
           test -d "$INNER_DIR" || { echo "INNER_DIR not a directory: $INNER_DIR" >&2; exit 1; }
-          nix develop --command "$PTYTEST_BIN" run e2e/scenarios/meta
+          nix develop --command "$PITTY_BIN" run e2e/scenarios/meta
 
   pty-e2e-macos:
     name: pty-e2e (macOS)
     runs-on: macos-latest
     needs: [lint, test]
-    # Required gate: the user runs ptytest locally on macOS often, so a macOS PTY
+    # Required gate: the user runs pitty locally on macOS often, so a macOS PTY
     # regression must block merges, not just inform. macOS PTY teardown is slower
     # than Linux, which is why the meta tier waits for inner exit via
     # expect_exit's deadline form rather than a fixed `wait` — the stabilization
@@ -113,15 +113,15 @@ jobs:
         run: nix develop --command cargo build
       - name: dogfood positive tier
         run: |
-          export PTYTEST_BIN="$PWD/target/debug/ptytest"
+          export PITTY_BIN="$PWD/target/debug/pitty"
           export INNER_DIR="$PWD/e2e/scenarios/meta/inner"
-          test -x "$PTYTEST_BIN" || { echo "PTYTEST_BIN not executable: $PTYTEST_BIN" >&2; exit 1; }
+          test -x "$PITTY_BIN" || { echo "PITTY_BIN not executable: $PITTY_BIN" >&2; exit 1; }
           test -d "$INNER_DIR" || { echo "INNER_DIR not a directory: $INNER_DIR" >&2; exit 1; }
-          nix develop --command "$PTYTEST_BIN" run e2e/scenarios/positive
+          nix develop --command "$PITTY_BIN" run e2e/scenarios/positive
       - name: dogfood meta tier (nested PTY)
         run: |
-          export PTYTEST_BIN="$PWD/target/debug/ptytest"
+          export PITTY_BIN="$PWD/target/debug/pitty"
           export INNER_DIR="$PWD/e2e/scenarios/meta/inner"
-          test -x "$PTYTEST_BIN" || { echo "PTYTEST_BIN not executable: $PTYTEST_BIN" >&2; exit 1; }
+          test -x "$PITTY_BIN" || { echo "PITTY_BIN not executable: $PITTY_BIN" >&2; exit 1; }
           test -d "$INNER_DIR" || { echo "INNER_DIR not a directory: $INNER_DIR" >&2; exit 1; }
-          nix develop --command "$PTYTEST_BIN" run e2e/scenarios/meta
+          nix develop --command "$PITTY_BIN" run e2e/scenarios/meta

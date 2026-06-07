@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 
-use ptytest::report::{Report, Status};
+use pitty::report::{Report, Status};
 use serde_json::Value;
 
 /// The set of top-level object keys in a JSON value.
@@ -34,7 +34,7 @@ fn set(items: &[&str]) -> BTreeSet<String> {
 
 #[test]
 fn report_json_field_set_is_frozen() {
-    use ptytest::assert::AssertionResult;
+    use pitty::assert::AssertionResult;
 
     let report = Report {
         scenario: "s".into(),
@@ -61,7 +61,7 @@ fn report_json_field_set_is_frozen() {
 
 #[test]
 fn matrix_report_json_field_set_is_frozen() {
-    use ptytest::matrix::{MatrixCell, MatrixReport};
+    use pitty::matrix::{MatrixCell, MatrixReport};
     use std::collections::BTreeMap;
 
     let mut coords = BTreeMap::new();
@@ -100,7 +100,7 @@ fn matrix_report_json_field_set_is_frozen() {
 
 #[test]
 fn bench_report_json_field_set_is_frozen() {
-    use ptytest::bench::{BenchReport, Stats};
+    use pitty::bench::{BenchReport, Stats};
 
     let report = BenchReport {
         scenario: "b".into(),

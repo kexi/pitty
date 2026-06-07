@@ -13,7 +13,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::config::Scenario;
-use crate::error::PtytestError;
+use crate::error::PittyError;
 use crate::report::Status;
 use crate::runner::{run_scenario, RunOptions};
 
@@ -195,7 +195,7 @@ impl BenchReport {
 /// Execute a scenario `warmup + runs` times and aggregate the measured runs.
 ///
 /// Warmup iterations run the scenario but are excluded from the report. A hard
-/// fault ([`PtytestError`]) from any iteration aborts the whole bench and is
+/// fault ([`PittyError`]) from any iteration aborts the whole bench and is
 /// returned to the caller (mapped to its severity exit code), since a process or
 /// scenario fault is not something repeating can characterize.
 ///
@@ -207,7 +207,7 @@ pub fn run_bench(
     options: &RunOptions,
     runs: usize,
     warmup: usize,
-) -> Result<BenchReport, PtytestError> {
+) -> Result<BenchReport, PittyError> {
     assert!(runs >= 1, "run_bench requires runs >= 1");
 
     // Discard warmup iterations: they prime caches/JITs so the measured runs are
@@ -246,7 +246,7 @@ pub fn run_bench(
 /// numeric mapping lives in one exhaustive table (Why not duplicate the
 /// literals: a future exit-code renumbering would otherwise have to change here
 /// too and could drift). Hard faults never reach here — they are returned as
-/// `Err` from [`run_bench`] and mapped via `PtytestError::exit_code` by the CLI;
+/// `Err` from [`run_bench`] and mapped via `PittyError::exit_code` by the CLI;
 /// this helper handles only the completed-report case.
 pub fn bench_exit_code(report: &BenchReport) -> u8 {
     let status = if report.pass_count == report.runs {
@@ -385,8 +385,8 @@ mod tests {
     fn fault_maps_straight_to_exit_code_class() {
         // A hard fault from a bench iteration must reach the CLI as its plain
         // class code (scenario 2 / process 3), the same conversion matrix uses.
-        assert_eq!(PtytestError::Scenario("x".into()).exit_code(), 2);
-        assert_eq!(PtytestError::Process("x".into()).exit_code(), 3);
+        assert_eq!(PittyError::Scenario("x".into()).exit_code(), 2);
+        assert_eq!(PittyError::Process("x".into()).exit_code(), 3);
     }
 
     #[test]

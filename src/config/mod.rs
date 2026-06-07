@@ -12,14 +12,14 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::error::PtytestError;
+use crate::error::PittyError;
 
 pub use step::{
     ExpectExitSpec, ExpectJsonSpec, ExpectNotSpec, ExpectSemanticSpec, ExpectSnapshotSpec, Key,
     MatchSpec, RegexSpec, Source, SpawnSpec, Step, KEY_NAMES, STEP_KEYS,
 };
 
-/// The scenario format version this build of ptytest understands.
+/// The scenario format version this build of pitty understands.
 ///
 /// Bumped only on a *breaking* change to the stable scenario input format (see
 /// `COMPATIBILITY.md`); additive field/step changes keep version 1.
@@ -53,7 +53,7 @@ fn default_version() -> u32 {
 /// `expect_json` raw form, …): the input format is contracted to grow by
 /// *adding* optional fields within v1 (see `COMPATIBILITY.md`), so a spec that
 /// denied unknown fields would reject a scenario written for a newer v1.x
-/// ptytest when run on an older one — breaking forward compatibility. Denying
+/// pitty when run on an older one — breaking forward compatibility. Denying
 /// only the top level catches the high-value typo without freezing the spec
 /// shapes, and on the untagged spec helpers it would additionally block serde's
 /// variant probing.
@@ -102,12 +102,12 @@ pub struct Scenario {
 impl Scenario {
     /// Parse a scenario from YAML source text.
     ///
-    /// Deserialization failures are classified as [`PtytestError::Scenario`]
+    /// Deserialization failures are classified as [`PittyError::Scenario`]
     /// (exit code 2) since they indicate a malformed scenario rather than a
     /// failed assertion or a process fault.
-    pub fn from_yaml(src: &str) -> Result<Self, PtytestError> {
+    pub fn from_yaml(src: &str) -> Result<Self, PittyError> {
         let scenario: Scenario = serde_norway::from_str(src)
-            .map_err(|e| PtytestError::Scenario(format!("failed to parse scenario: {e}")))?;
+            .map_err(|e| PittyError::Scenario(format!("failed to parse scenario: {e}")))?;
         scenario.validate_version()?;
         Ok(scenario)
     }
@@ -119,16 +119,16 @@ impl Scenario {
     /// `deny_unknown_fields` a brand-new top key would already error, but a newer
     /// step *value* shape could still deserialize loosely and run with the new
     /// semantics silently dropped — a false green. Refusing up front tells the
-    /// user to update ptytest instead of trusting a partial interpretation. An
+    /// user to update pitty instead of trusting a partial interpretation. An
     /// older-than-1 version cannot occur (1 is the floor and the default).
-    fn validate_version(&self) -> Result<(), PtytestError> {
+    fn validate_version(&self) -> Result<(), PittyError> {
         let is_supported = self.version == SUPPORTED_VERSION;
         if is_supported {
             return Ok(());
         }
-        Err(PtytestError::Scenario(format!(
-            "unsupported scenario version {}; this ptytest supports version {} \
-             (update ptytest for newer scenarios)",
+        Err(PittyError::Scenario(format!(
+            "unsupported scenario version {}; this pitty supports version {} \
+             (update pitty for newer scenarios)",
             self.version, SUPPORTED_VERSION
         )))
     }
@@ -149,9 +149,9 @@ impl Scenario {
     }
 
     /// Read and parse a scenario from a file path.
-    pub fn from_path(path: &Path) -> Result<Self, PtytestError> {
+    pub fn from_path(path: &Path) -> Result<Self, PittyError> {
         let src = std::fs::read_to_string(path).map_err(|e| {
-            PtytestError::Scenario(format!("cannot read scenario '{}': {e}", path.display()))
+            PittyError::Scenario(format!("cannot read scenario '{}': {e}", path.display()))
         })?;
         Self::from_yaml(&src)
     }
@@ -167,7 +167,7 @@ impl Scenario {
     /// the scenario carries one or more axes, each with a non-empty value list,
     /// a key referenced as `${key}` somewhere expansion reaches, and no collision
     /// with a `secret: true` variable. The runner takes the Cartesian product of
-    /// these axes. All failure modes are [`PtytestError::Scenario`] (exit code 2):
+    /// these axes. All failure modes are [`PittyError::Scenario`] (exit code 2):
     /// - no matrix section at all (callers should branch on [`Scenario::has_matrix`]
     ///   first; this guards the direct call),
     /// - any axis with an empty value list (`command: []`) — that axis would make
@@ -180,10 +180,10 @@ impl Scenario {
     /// Why every axis is checked (not just one): each axis is injected and varied
     /// independently, so each must individually satisfy the same contracts the
     /// single-axis path enforced; a single bad axis can poison the whole product.
-    pub fn matrix_axes(&self) -> Result<Vec<(&str, &[String])>, PtytestError> {
+    pub fn matrix_axes(&self) -> Result<Vec<(&str, &[String])>, PittyError> {
         if self.matrix.is_empty() {
-            return Err(PtytestError::Scenario(
-                "no matrix section; use `ptytest run` for plain scenarios".to_string(),
+            return Err(PittyError::Scenario(
+                "no matrix section; use `pitty run` for plain scenarios".to_string(),
             ));
         }
 
@@ -196,7 +196,7 @@ impl Scenario {
             // a false green that hides a scenario that never actually ran. Reject
             // it as an authoring mistake rather than silently passing.
             if values.is_empty() {
-                return Err(PtytestError::Scenario(format!(
+                return Err(PittyError::Scenario(format!(
                     "matrix axis '{axis}' has no values"
                 )));
             }
@@ -214,7 +214,7 @@ impl Scenario {
                 .map(VarSpec::is_secret)
                 .unwrap_or(false);
             if collides_with_secret {
-                return Err(PtytestError::Scenario(format!(
+                return Err(PittyError::Scenario(format!(
                     "matrix axis '{axis}' collides with a secret-declared variable"
                 )));
             }
@@ -227,7 +227,7 @@ impl Scenario {
                 .expansion_targets()
                 .any(|text| text.contains(&placeholder));
             if !is_referenced {
-                return Err(PtytestError::Scenario(format!(
+                return Err(PittyError::Scenario(format!(
                     "matrix key '{axis}' is never referenced as ${{{axis}}}"
                 )));
             }

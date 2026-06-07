@@ -1,6 +1,6 @@
-# Release automation: build prebuilt ptytest binaries and publish them to a
+# Release automation: build prebuilt pitty binaries and publish them to a
 # GitHub Release, then move the floating `v1` major tag and publish a second set
-# of assets named for `v1` so `uses: kexi/ptytest@v1` resolves a prebuilt binary.
+# of assets named for `v1` so `uses: kexi/pitty@v1` resolves a prebuilt binary.
 #
 # Trigger: this runs ONLY on a `v*` tag push (e.g. `v1.1.0`), never on
 # `pull_request`. A release job has `contents: write` and the GITHUB_TOKEN in
@@ -9,7 +9,7 @@
 # why there is deliberately no `pull_request`/`pull_request_target` trigger.
 #
 # Asset-name contract (the load-bearing detail): action.yml downloads
-#   ptytest-${ref}-$(uname -s)-$(uname -m).tar.gz
+#   pitty-${ref}-$(uname -s)-$(uname -m).tar.gz
 # so the archive names produced here MUST use the raw `uname` os/arch values, not
 # the Rust target triple. In particular Apple Silicon is `arm64` from `uname -m`
 # even though we build the `aarch64-apple-darwin` triple — the archive is named
@@ -39,14 +39,14 @@ jobs:
   # tag (e.g. v1.1.0) and the floating `v1` ref. upload-rust-binary-action's
   # `ref` input selects which release/tag the asset attaches to and feeds the
   # `$tag` template variable, so the same matrix entry produces, for one target:
-  #   ptytest-v1.1.0-<os>-<arch>.tar.gz   (attached to the v1.1.0 release)
-  #   ptytest-v1-<os>-<arch>.tar.gz       (attached to the v1 release)
+  #   pitty-v1.1.0-<os>-<arch>.tar.gz   (attached to the v1.1.0 release)
+  #   pitty-v1-<os>-<arch>.tar.gz       (attached to the v1 release)
   upload-assets:
     name: ${{ matrix.os_name }}-${{ matrix.arch_name }} (${{ matrix.target }})
     # Skip the dotless `v1` push. Why: move-v1-tag force-pushes the floating
     # `v1` tag, which fires the `v*` trigger a second time with ref_name `v1`.
     # Without this guard that 2nd run would re-build and re-upload assets named
-    # `ptytest-v1-...` (ref_name=v1), colliding with the assets upload-v1-assets
+    # `pitty-v1-...` (ref_name=v1), colliding with the assets upload-v1-assets
     # already attached to the `v1` release. The `contains('.')` clause excludes
     # the dotless `v1` so all three jobs (this, move-v1-tag, upload-v1-assets)
     # become no-ops on the 2nd push, ending the recursion. `startsWith('v')` is
@@ -90,20 +90,20 @@ jobs:
       # Publish the asset under the pushed tag (e.g. v1.1.0). `archive` is a
       # literal name embedding the raw uname os/arch (not $target) so it matches
       # action.yml's download URL exactly; `leading-dir: false` places the
-      # `ptytest` binary at the tarball root so the action's
-      # `tar -xzf -C $HOME/.local/bin` yields `$HOME/.local/bin/ptytest`.
+      # `pitty` binary at the tarball root so the action's
+      # `tar -xzf -C $HOME/.local/bin` yields `$HOME/.local/bin/pitty`.
       # Why not rely on the action default: a future upload-rust-binary-action
-      # release could flip the default to a leading `ptytest-.../` directory,
-      # which would make action.yml's `chmod +x "$HOME/.local/bin/ptytest"` hit
+      # release could flip the default to a leading `pitty-.../` directory,
+      # which would make action.yml's `chmod +x "$HOME/.local/bin/pitty"` hit
       # "No such file"; pinning it here fixes the tarball layout regardless.
       - name: Upload assets for the release tag
         uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
-          bin: ptytest
+          bin: pitty
           target: ${{ matrix.target }}
           # Cross-build Linux aarch64 via `cross`; native build for the rest.
           build-tool: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'cross' || 'cargo' }}
-          archive: ptytest-${{ github.ref_name }}-${{ matrix.os_name }}-${{ matrix.arch_name }}
+          archive: pitty-${{ github.ref_name }}-${{ matrix.os_name }}-${{ matrix.arch_name }}
           leading-dir: false
           tar: all
           zip: none
@@ -132,7 +132,7 @@ jobs:
           # Full history so the tag move points at a real commit object.
           fetch-depth: 0
 
-      # Force-move `v1` to the release commit so `uses: kexi/ptytest@v1` and
+      # Force-move `v1` to the release commit so `uses: kexi/pitty@v1` and
       # `cargo install --git --tag v1` resolve to this release. The push uses the
       # workflow GITHUB_TOKEN (contents: write), so no PAT is needed.
       - name: Move v1 tag to the release commit
@@ -187,11 +187,11 @@ jobs:
       - name: Upload assets for the v1 tag
         uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
-          bin: ptytest
+          bin: pitty
           target: ${{ matrix.target }}
           build-tool: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'cross' || 'cargo' }}
           ref: refs/tags/v1
-          archive: ptytest-v1-${{ matrix.os_name }}-${{ matrix.arch_name }}
+          archive: pitty-v1-${{ matrix.os_name }}-${{ matrix.arch_name }}
           leading-dir: false
           tar: all
           zip: none

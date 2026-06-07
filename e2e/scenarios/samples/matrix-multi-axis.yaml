@@ -7,7 +7,7 @@
 # lexicographic key order (command, region), later axis varying fastest:
 # (echo,us), (echo,eu), (printf,us), (printf,eu).
 #
-# Run with: ptytest matrix e2e/scenarios/samples/matrix-multi-axis.yaml
+# Run with: pitty matrix e2e/scenarios/samples/matrix-multi-axis.yaml
 name: matrix-multi-axis
 workspace:
   temp: true

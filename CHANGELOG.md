@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to ptytest are documented here. The format is based on
+All notable changes to pitty are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/). See
 [`COMPATIBILITY.md`](COMPATIBILITY.md) for what the version number guarantees
@@ -15,8 +15,8 @@ releases; only 1.0.0 carries a release date.
 
 - **Prebuilt-binary release automation.** A tag-push-triggered workflow
   ([`.github/workflows/release.yml`](.github/workflows/release.yml)) builds
-  `ptytest` for four `OS × arch` targets (Linux x86_64/aarch64, macOS
-  x86_64/arm64) and uploads each as `ptytest-<ref>-<os>-<arch>.tar.gz` with a
+  `pitty` for four `OS × arch` targets (Linux x86_64/aarch64, macOS
+  x86_64/arm64) and uploads each as `pitty-<ref>-<os>-<arch>.tar.gz` with a
   `.sha256` checksum to the GitHub Release. The os/arch in the asset name use
   the raw `uname -s`/`uname -m` values the composite action keys on, so the
   action's fast path now finds a prebuilt binary instead of always building from
@@ -24,8 +24,8 @@ releases; only 1.0.0 carries a release date.
   ([`tests/release_asset_name_contract.rs`](tests/release_asset_name_contract.rs))
   pins the release asset names to what `action.yml` downloads.
 - **Floating `v1` major tag.** Each `v1.x.y` tag push force-moves the `v1` tag to
-  the release commit and publishes a parallel set of `ptytest-v1-<os>-<arch>.tar.gz`
-  assets, so `uses: kexi/ptytest@v1` both resolves the action ref and gets a
+  the release commit and publishes a parallel set of `pitty-v1-<os>-<arch>.tar.gz`
+  assets, so `uses: kexi/pitty@v1` both resolves the action ref and gets a
   prebuilt binary. The composite action's default `version` input is now `v1`.
 
 ## [1.0.0] - 2026-06-06
@@ -37,7 +37,7 @@ contracts (see [`COMPATIBILITY.md`](COMPATIBILITY.md) and [`SCHEMA.md`](SCHEMA.m
 
 - **Stable scenario format.** The YAML scenario format is specified in
   [`SCHEMA.md`](SCHEMA.md), with a hand-written JSON Schema at
-  [`schema/ptytest-scenario-v1.json`](schema/ptytest-scenario-v1.json) for
+  [`schema/pitty-scenario-v1.json`](schema/pitty-scenario-v1.json) for
   editor validation/autocompletion.
 - **`version` field.** Scenarios may declare `version: 1` (the default when
   omitted). A scenario declaring an unsupported version is rejected with a
@@ -51,7 +51,7 @@ contracts (see [`COMPATIBILITY.md`](COMPATIBILITY.md) and [`SCHEMA.md`](SCHEMA.m
     `::warning` for a flaky `bench`. Step summaries and annotations are always
     secret-masked.
   - A composite action ([`action.yml`](action.yml)) lets workflows use
-    `uses: kexi/ptytest@v1`.
+    `uses: kexi/pitty@v1`.
 
 ### Changed
 

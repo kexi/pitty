@@ -1,7 +1,7 @@
 # Dogfood: expect_semantic over a real PTY. After the shell prints a known
 # message, expect_semantic asserts the output is lexically close to an expected
 # text above a threshold. Proves the lexical-approximation backend works end to
-# end when ptytest runs itself. (snapshot is not dogfooded here because it would
+# end when pitty runs itself. (snapshot is not dogfooded here because it would
 # commit a terminal-dependent snapshot file into the repo.)
 name: expect-semantic
 workspace:

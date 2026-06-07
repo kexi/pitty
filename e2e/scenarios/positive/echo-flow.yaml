@@ -1,6 +1,6 @@
 # Dogfood: minimal echo flow. Mirrors the former tests/e2e.rs
 # `minimal_echo_flow_passes`. Proves spawn -> send -> expect works over a real
-# PTY when ptytest runs itself.
+# PTY when pitty runs itself.
 name: echo-flow
 workspace:
   temp: true

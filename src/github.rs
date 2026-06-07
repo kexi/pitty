@@ -1,6 +1,6 @@
 //! GitHub Actions integration: step summaries and workflow annotations.
 //!
-//! When ptytest runs inside GitHub Actions it can emit two side-channel
+//! When pitty runs inside GitHub Actions it can emit two side-channel
 //! outputs in addition to its normal stdout/exit code:
 //!
 //! - a **step summary**: Markdown appended to the file named by
@@ -35,7 +35,7 @@ const STEP_SUMMARY_ENV: &str = "GITHUB_STEP_SUMMARY";
 ///
 /// True when running on a GitHub Actions runner (`GITHUB_ACTIONS=true`) or when
 /// the caller forced it on (`--github`). The two are OR-ed, mirroring the
-/// existing `--update`/`PTYTEST_UPDATE_SNAPSHOTS` pattern, so a user can preview
+/// existing `--update`/`PITTY_UPDATE_SNAPSHOTS` pattern, so a user can preview
 /// the output locally without faking the runner environment.
 pub fn github_enabled(flag: bool) -> bool {
     flag || is_github_actions()
@@ -161,7 +161,7 @@ fn escape_with(value: &str, property: bool) -> String {
 pub fn report_to_markdown(report: &Report, secrets: &[String]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "### ptytest: {} — {}\n\n",
+        "### pitty: {} — {}\n\n",
         mask_secrets(&report.scenario, secrets),
         status_verdict_label(report.status)
     ));
@@ -190,7 +190,7 @@ pub fn report_to_markdown(report: &Report, secrets: &[String]) -> String {
 pub fn matrix_to_markdown(report: &MatrixReport, secrets: &[String]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "### ptytest matrix — {}/{} passed\n\n",
+        "### pitty matrix — {}/{} passed\n\n",
         report.passed(),
         report.total()
     ));
@@ -228,7 +228,7 @@ pub fn bench_to_markdown(report: &BenchReport, secrets: &[String]) -> String {
     let s = &report.stats;
     let mut out = String::new();
     out.push_str(&format!(
-        "### ptytest bench: {} — {}/{} passed{}\n\n",
+        "### pitty bench: {} — {}/{} passed{}\n\n",
         mask_then_escape(&report.scenario, secrets),
         report.pass_count,
         report.runs,
@@ -280,7 +280,7 @@ pub fn report_outputs(report: &Report, secrets: &[String]) {
         if assertion.passed {
             continue;
         }
-        let title = format!("ptytest: {}", report.scenario);
+        let title = format!("pitty: {}", report.scenario);
         let message = match &assertion.message {
             Some(m) => format!("{} — {}", assertion.step, m),
             None => assertion.step.clone(),
@@ -302,7 +302,7 @@ pub fn matrix_outputs(report: &MatrixReport, secrets: &[String]) {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let title = format!("ptytest matrix: {}", cell.report.scenario);
+        let title = format!("pitty matrix: {}", cell.report.scenario);
         emit_error_annotation(&title, &format!("cell failed: {coords}"), secrets);
     }
 }
@@ -478,7 +478,7 @@ mod tests {
             ],
         };
         let md = report_to_markdown(&report, &[]);
-        assert!(md.contains("### ptytest: demo — PASS"));
+        assert!(md.contains("### pitty: demo — PASS"));
         assert_eq!(md.matches("| PASS |").count(), 2);
     }
 

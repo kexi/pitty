@@ -10,22 +10,18 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 
 use crate::config::Scenario;
-use crate::error::{severity, PtytestError};
+use crate::error::{severity, PittyError};
 use crate::github::{self, github_enabled};
 use crate::runner::{run_scenario, RunOptions};
 
 /// Embedded scaffold scenario, copied by `init`.
 const HELLO_SCENARIO: &str = include_str!("../assets/scenarios/hello.yaml");
 /// Embedded top-level config, copied by `init`.
-const DEFAULT_CONFIG: &str = include_str!("../assets/ptytest.yaml");
+const DEFAULT_CONFIG: &str = include_str!("../assets/pitty.yaml");
 
-/// ptytest command-line interface.
+/// pitty command-line interface.
 #[derive(Debug, Parser)]
-#[command(
-    name = "ptytest",
-    version,
-    about = "PTY-based E2E testing for CLIs and agents"
-)]
+#[command(name = "pitty", version, about = "PTY-based CLI testing framework")]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -33,7 +29,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Scaffold `ptytest.yaml` and `scenarios/` in the current directory.
+    /// Scaffold `pitty.yaml` and `scenarios/` in the current directory.
     Init,
     /// Run a scenario file or every scenario in a directory.
     Run {
@@ -41,7 +37,7 @@ enum Command {
         path: PathBuf,
         /// Record or refresh `expect_snapshot` files instead of failing on an
         /// absent or mismatched snapshot. Also enabled by setting the
-        /// `PTYTEST_UPDATE_SNAPSHOTS` environment variable.
+        /// `PITTY_UPDATE_SNAPSHOTS` environment variable.
         #[arg(long)]
         update: bool,
         /// Emit a GitHub Actions step summary and failure annotations. Auto-on
@@ -132,24 +128,24 @@ pub fn dispatch() -> u8 {
     }
 }
 
-/// Whether `PTYTEST_UPDATE_SNAPSHOTS` is set to a truthy value.
+/// Whether `PITTY_UPDATE_SNAPSHOTS` is set to a truthy value.
 ///
 /// Accepts `1`, `true`, or `yes`, case-insensitively (the value is trimmed and
 /// lowercased first), so `TRUE`/`Yes`/` true ` all enable updating. Any other
 /// value (or an unset var) is false.
 fn env_update_enabled() -> bool {
-    match std::env::var("PTYTEST_UPDATE_SNAPSHOTS") {
+    match std::env::var("PITTY_UPDATE_SNAPSHOTS") {
         Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
         Err(_) => false,
     }
 }
 
-/// `ptytest init`: write the scaffold without clobbering existing files.
+/// `pitty init`: write the scaffold without clobbering existing files.
 ///
 /// Existing files are left untouched (with a warning) rather than overwritten,
 /// so re-running `init` in a populated project is safe.
 fn cmd_init() -> u8 {
-    let config_path = Path::new("ptytest.yaml");
+    let config_path = Path::new("pitty.yaml");
     write_if_absent(config_path, DEFAULT_CONFIG);
 
     let scenarios_dir = Path::new("scenarios");
@@ -159,7 +155,7 @@ fn cmd_init() -> u8 {
     }
     write_if_absent(&scenarios_dir.join("hello.yaml"), HELLO_SCENARIO);
 
-    println!("Initialized ptytest project (ptytest.yaml, scenarios/hello.yaml).");
+    println!("Initialized pitty project (pitty.yaml, scenarios/hello.yaml).");
     0
 }
 
@@ -178,7 +174,7 @@ fn write_if_absent(path: &Path, contents: &str) {
     }
 }
 
-/// `ptytest run <path>`: run one file or all scenarios under a directory.
+/// `pitty run <path>`: run one file or all scenarios under a directory.
 ///
 /// Multiple scenarios run sequentially in name order; the final exit code is
 /// the most severe outcome across them (process > scenario > assertion >
@@ -234,7 +230,7 @@ fn run_one(file: &Path, options: &RunOptions, github: bool) -> u8 {
     // to) and hide the other cells. Refuse with guidance to the right command.
     if scenario.has_matrix() {
         eprintln!(
-            "error in {}: scenario has a matrix section; use `ptytest matrix` to run it",
+            "error in {}: scenario has a matrix section; use `pitty matrix` to run it",
             file.display()
         );
         return 2;
@@ -257,7 +253,7 @@ fn run_one(file: &Path, options: &RunOptions, github: bool) -> u8 {
             // Single Status -> exit-code table (see report::status_exit_code):
             // Passed 0 / Failed 1 (an assertion did not hold). Hard faults never
             // reach this arm — run_scenario returns Err for them, handled below
-            // via PtytestError::exit_code (scenario 2 / process 3).
+            // via PittyError::exit_code (scenario 2 / process 3).
             crate::report::status_exit_code(report.status)
         }
         Err(e) => {
@@ -268,14 +264,14 @@ fn run_one(file: &Path, options: &RunOptions, github: bool) -> u8 {
 }
 
 /// Resolve `path` into the ordered list of scenario files to run.
-fn collect_scenarios(path: &Path) -> Result<Vec<PathBuf>, PtytestError> {
+fn collect_scenarios(path: &Path) -> Result<Vec<PathBuf>, PittyError> {
     if path.is_file() {
         return Ok(vec![path.to_path_buf()]);
     }
     if path.is_dir() {
         return Ok(list_yaml_files(path));
     }
-    Err(PtytestError::Scenario(format!(
+    Err(PittyError::Scenario(format!(
         "path does not exist: {}",
         path.display()
     )))
@@ -306,7 +302,7 @@ fn is_yaml(path: &Path) -> bool {
     )
 }
 
-/// `ptytest list`: print scenario names found under `dir` (default
+/// `pitty list`: print scenario names found under `dir` (default
 /// `scenarios/`).
 ///
 /// Each file is parsed only enough to read its `name`; an unparseable file is
@@ -327,7 +323,7 @@ fn cmd_list(dir: Option<&Path>) -> u8 {
     0
 }
 
-/// `ptytest matrix <file>`: run a matrix scenario once per cell of its axes'
+/// `pitty matrix <file>`: run a matrix scenario once per cell of its axes'
 /// Cartesian product.
 ///
 /// Prints the aligned PASS/FAIL table (or JSON with `--json`) and returns the
@@ -350,8 +346,8 @@ fn cmd_matrix(file: &Path, json: bool, no_fail: bool, github: bool) -> u8 {
     // snapshot path, so the last cell would clobber whatever the earlier cells
     // recorded — a write race that makes the "golden" file meaningless. A cell
     // whose snapshot is absent therefore fails (`not recorded; rerun with
-    // --update`); record snapshots with `ptytest run --update` first, then gate
-    // with `ptytest matrix`.
+    // --update`); record snapshots with `pitty run --update` first, then gate
+    // with `pitty matrix`.
     match crate::matrix::run_matrix(&scenario, base_dir, &RunOptions::default()) {
         Ok(report) => {
             if json {
@@ -386,7 +382,7 @@ fn cmd_matrix(file: &Path, json: bool, no_fail: bool, github: bool) -> u8 {
     }
 }
 
-/// `ptytest bench <file>`: repeat a scenario and report duration statistics.
+/// `pitty bench <file>`: repeat a scenario and report duration statistics.
 ///
 /// Prints the human summary (or JSON with `--json`) and returns 0 only when
 /// every measured run passed; any assertion failure yields 1, and a hard fault
@@ -413,7 +409,7 @@ fn cmd_bench(file: &Path, runs: usize, warmup: usize, json: bool, github: bool) 
     // unreferenced/secret-collision) skipped. Reject it like `run` does.
     if scenario.has_matrix() {
         eprintln!(
-            "error in {}: scenario has a matrix section; use `ptytest matrix` to run it",
+            "error in {}: scenario has a matrix section; use `pitty matrix` to run it",
             file.display()
         );
         return 2;
@@ -427,7 +423,7 @@ fn cmd_bench(file: &Path, runs: usize, warmup: usize, json: bool, github: bool) 
     // every run after the first would re-record the same snapshot from a slightly
     // different output, and the recorded "golden" would just be whichever run
     // happened to write last — noise, not a baseline. A run whose snapshot is
-    // absent therefore fails; record with `ptytest run --update` first.
+    // absent therefore fails; record with `pitty run --update` first.
     match crate::bench::run_bench(&scenario, base_dir, &RunOptions::default(), runs, warmup) {
         Ok(report) => {
             if json {
@@ -442,7 +438,7 @@ fn cmd_bench(file: &Path, runs: usize, warmup: usize, json: bool, github: bool) 
         }
         Err(e) => {
             // Mirror matrix's error path: a hard fault maps straight through
-            // `PtytestError::exit_code` (scenario 2 / process 3), so the two
+            // `PittyError::exit_code` (scenario 2 / process 3), so the two
             // orchestration commands share one exit-code conversion path.
             eprintln!("error in {}: {e}", file.display());
             e.exit_code()
@@ -542,8 +538,8 @@ mod tests {
 
     #[test]
     fn run_refuses_matrix_scenario_with_guidance() {
-        // `ptytest run` on a matrix scenario must not silently single-run; it
-        // returns the scenario class (2) and points to `ptytest matrix`.
+        // `pitty run` on a matrix scenario must not silently single-run; it
+        // returns the scenario class (2) and points to `pitty matrix`.
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("m.yaml");
         fs::write(
@@ -556,10 +552,10 @@ mod tests {
 
     #[test]
     fn bench_refuses_matrix_scenario_with_guidance() {
-        // `ptytest bench` on a matrix scenario must reject it (exit 2): run_bench
+        // `pitty bench` on a matrix scenario must reject it (exit 2): run_bench
         // would call run_scenario N times without injecting the axis values, so
         // every run would be identical with `${command}` unexpanded. Like `run`,
-        // it points the user at `ptytest matrix`.
+        // it points the user at `pitty matrix`.
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("m.yaml");
         fs::write(
@@ -572,7 +568,7 @@ mod tests {
 
     #[test]
     fn matrix_command_rejects_file_without_matrix_section() {
-        // `ptytest matrix` on a plain scenario (no matrix:) must error (exit 2)
+        // `pitty matrix` on a plain scenario (no matrix:) must error (exit 2)
         // rather than run it as a single cell.
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("plain.yaml");
@@ -596,9 +592,9 @@ mod tests {
         // Hold the shared env lock so this set/remove cannot interleave with the
         // matrix module's max_cells test, which reads the same var.
         let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        std::env::set_var("PTYTEST_MATRIX_MAX_CELLS", "1");
+        std::env::set_var("PITTY_MATRIX_MAX_CELLS", "1");
         let code = cmd_matrix(&file, false, false, false);
-        std::env::remove_var("PTYTEST_MATRIX_MAX_CELLS");
+        std::env::remove_var("PITTY_MATRIX_MAX_CELLS");
         assert_eq!(code, 2);
     }
 

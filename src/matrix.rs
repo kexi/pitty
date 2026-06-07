@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::cli::aggregate_exit_codes;
 use crate::config::{Scenario, VarSpec};
-use crate::error::PtytestError;
+use crate::error::PittyError;
 use crate::report::{status_exit_code, status_verdict_label, Report, Status};
 use crate::runner::{run_scenario, RunOptions};
 
@@ -36,7 +36,7 @@ const DEFAULT_MAX_CELLS: usize = 256;
 /// CI can intentionally raise the ceiling for a large sweep. An unset or
 /// unparseable value falls back to the default (see [`max_cells`]) so a typo can
 /// never panic the harness or silently disable the guard.
-const MAX_CELLS_ENV: &str = "PTYTEST_MATRIX_MAX_CELLS";
+const MAX_CELLS_ENV: &str = "PITTY_MATRIX_MAX_CELLS";
 
 /// One matrix cell: the per-axis values injected and the resulting run report.
 #[derive(Debug, Clone, Serialize)]
@@ -195,7 +195,7 @@ fn cell_value_only(cell: &MatrixCell) -> &str {
 /// Validates every axis first (non-empty values, key referenced as `${key}`, no
 /// secret collision) via [`Scenario::matrix_axes`], then expands the product with
 /// the size/overflow guard enforced inside [`cell_coordinates`] against
-/// [`max_cells`]; both surface as [`PtytestError::Scenario`]. For each cell,
+/// [`max_cells`]; both surface as [`PittyError::Scenario`]. For each cell,
 /// clones the scenario and injects the cell's per-axis values.
 ///
 /// A hard fault from any cell aborts the matrix and is returned to the caller;
@@ -205,7 +205,7 @@ pub fn run_matrix(
     scenario: &Scenario,
     base_dir: &Path,
     options: &RunOptions,
-) -> Result<MatrixReport, PtytestError> {
+) -> Result<MatrixReport, PittyError> {
     let axes = scenario.matrix_axes()?;
     let axis_names: Vec<String> = axes.iter().map(|(name, _)| name.to_string()).collect();
 
@@ -275,14 +275,15 @@ fn max_cells() -> usize {
 fn cell_coordinates(
     axes: &[(&str, &[String])],
     limit: usize,
-) -> Result<Vec<BTreeMap<String, String>>, PtytestError> {
+) -> Result<Vec<BTreeMap<String, String>>, PittyError> {
     let mut combos: Vec<BTreeMap<String, String>> = vec![BTreeMap::new()];
     for (axis, values) in axes {
-        let next_count = combos.len().checked_mul(values.len()).ok_or_else(|| {
-            PtytestError::Scenario("matrix cell count overflows usize".to_string())
-        })?;
+        let next_count = combos
+            .len()
+            .checked_mul(values.len())
+            .ok_or_else(|| PittyError::Scenario("matrix cell count overflows usize".to_string()))?;
         if next_count > limit {
-            return Err(PtytestError::Scenario(format!(
+            return Err(PittyError::Scenario(format!(
                 "matrix would expand to more than {limit} cells; \
                  reduce axes/values or raise {MAX_CELLS_ENV}"
             )));
@@ -551,7 +552,7 @@ steps:
 
     #[test]
     fn max_cells_zero_env_rejects_even_a_minimal_matrix() {
-        // (AC-6) PTYTEST_MATRIX_MAX_CELLS=0 parses to Ok(0), so the cap becomes 0
+        // (AC-6) PITTY_MATRIX_MAX_CELLS=0 parses to Ok(0), so the cap becomes 0
         // (NOT a fallback to the default): the per-axis guard's `next_count >= 1`
         // always exceeds 0, so even the smallest possible matrix (one axis, one
         // value -> one cell) is rejected as a Scenario error (exit 2). This pins
@@ -579,7 +580,7 @@ steps:
 
     #[test]
     fn max_cells_defaults_and_overrides_and_falls_back() {
-        // The cell cap reads PTYTEST_MATRIX_MAX_CELLS, defaulting to 256 when
+        // The cell cap reads PITTY_MATRIX_MAX_CELLS, defaulting to 256 when
         // unset, honoring a valid override, and falling back to the default on a
         // non-numeric value (never panicking). Env access is process-global, so
         // this single test exercises all three cases serially and holds the shared

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use crate::config::Scenario;
-use crate::error::PtytestError;
+use crate::error::PittyError;
 
 /// A prepared workspace for a scenario run.
 pub struct Workspace {
@@ -46,7 +46,7 @@ impl Workspace {
     /// constructing our own predictable name: self-named temp dirs are prone
     /// to races and symlink attacks, whereas `TempDir` creates the directory
     /// atomically with a random name.
-    pub fn prepare(scenario: &Scenario, base_dir: &Path) -> Result<Self, PtytestError> {
+    pub fn prepare(scenario: &Scenario, base_dir: &Path) -> Result<Self, PittyError> {
         let mut secrets = Vec::new();
         let mut variables = BTreeMap::new();
         for (name, spec) in &scenario.variables {
@@ -65,7 +65,7 @@ impl Workspace {
 
         let (cwd, temp) = if scenario.workspace.temp {
             let dir = TempDir::new().map_err(|e| {
-                PtytestError::Process(format!("failed to create temp workspace: {e}"))
+                PittyError::Process(format!("failed to create temp workspace: {e}"))
             })?;
             set_permissions_0700(dir.path())?;
             (dir.path().to_path_buf(), Some(dir))
@@ -118,13 +118,13 @@ impl Workspace {
     /// under single-trust we accept that a scenario can *read* anything the user
     /// can read, so confining read targets would add friction for no real safety
     /// gain. A *write*, however, mutates the filesystem, and `expect_snapshot`
-    /// under `--update` (especially with `PTYTEST_UPDATE_SNAPSHOTS=1` set
+    /// under `--update` (especially with `PITTY_UPDATE_SNAPSHOTS=1` set
     /// globally in CI) records files automatically. A broken or hostile scenario
     /// with `file: ../../../tmp/x.snap` would then write outside the workspace on
     /// every run. Confining writes to the workspace keeps an automated record
     /// step from clobbering arbitrary paths, while leaving the (harmless) read
     /// asymmetry intact.
-    pub fn resolve_write_path(&self, rel: &str) -> Result<PathBuf, PtytestError> {
+    pub fn resolve_write_path(&self, rel: &str) -> Result<PathBuf, PittyError> {
         let candidate = self.cwd.join(rel);
         let root = canonical_root(&self.cwd);
         // Canonicalize as far as the path exists: a brand-new snapshot file (and
@@ -136,7 +136,7 @@ impl Workspace {
         if is_within(&resolved, &root) {
             return Ok(candidate);
         }
-        Err(PtytestError::Scenario(format!(
+        Err(PittyError::Scenario(format!(
             "snapshot path '{rel}' escapes the workspace; \
              snapshot writes are confined to the workspace directory"
         )))
@@ -149,8 +149,8 @@ impl Workspace {
     /// the literal `${name}` text if still undefined.
     ///
     /// Why the parent-env fallback: dogfood "meta" scenarios spawn an inner
-    /// `ptytest` whose absolute path the surrounding CI exports as an
-    /// environment variable (`PTYTEST_BIN`). Scenario `variables` cannot carry
+    /// `pitty` whose absolute path the surrounding CI exports as an
+    /// environment variable (`PITTY_BIN`). Scenario `variables` cannot carry
     /// a caller-supplied path (they are baked into the YAML), and scenario `env`
     /// is injected into the spawned child rather than consulted by `${var}`
     /// expansion of `spawn.command`. Falling back to the parent env lets the
@@ -222,16 +222,16 @@ impl Workspace {
 
 /// Apply `0700` permissions to a directory (Unix only).
 #[cfg(unix)]
-fn set_permissions_0700(path: &Path) -> Result<(), PtytestError> {
+fn set_permissions_0700(path: &Path) -> Result<(), PittyError> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| PtytestError::Process(format!("failed to set temp dir mode: {e}")))
+        .map_err(|e| PittyError::Process(format!("failed to set temp dir mode: {e}")))
 }
 
-/// No-op on non-Unix. ptytest targets Unix PTYs, but keep this compiling
+/// No-op on non-Unix. pitty targets Unix PTYs, but keep this compiling
 /// portably so a non-Unix build fails on PTY use, not on permissions.
 #[cfg(not(unix))]
-fn set_permissions_0700(_path: &Path) -> Result<(), PtytestError> {
+fn set_permissions_0700(_path: &Path) -> Result<(), PittyError> {
     Ok(())
 }
 
@@ -390,9 +390,9 @@ mod tests {
     fn expands_from_parent_env_when_not_a_scenario_variable() {
         // A name absent from scenario variables but present in the parent env
         // must expand from the env: this is how a meta scenario resolves the
-        // CI-exported ${PTYTEST_BIN} path into spawn.command.
-        let ws = workspace_with_vars_and_env(&[], &[("PTYTEST_BIN", "/abs/ptytest")], &[]);
-        assert_eq!(ws.expand("${PTYTEST_BIN} run x"), "/abs/ptytest run x");
+        // CI-exported ${PITTY_BIN} path into spawn.command.
+        let ws = workspace_with_vars_and_env(&[], &[("PITTY_BIN", "/abs/pitty")], &[]);
+        assert_eq!(ws.expand("${PITTY_BIN} run x"), "/abs/pitty run x");
     }
 
     #[test]
@@ -481,7 +481,7 @@ steps: []
         // (it must declare `secret: true`), and this test fixes that contract so
         // a future change cannot quietly start masking — or claim to mask —
         // parent-env values.
-        let key = "PTYTEST_TEST_PARENT_ENV_SECRET";
+        let key = "PITTY_TEST_PARENT_ENV_SECRET";
         // Set on this process so `prepare`'s `std::env::vars()` snapshot sees it.
         std::env::set_var(key, "ambient-would-be-secret");
         let yaml = format!("name: env-fallback\nsteps:\n  - send: \"${{{key}}}\"\n");

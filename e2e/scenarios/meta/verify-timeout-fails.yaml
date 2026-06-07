@@ -1,22 +1,22 @@
-# Dogfood meta (nested PTY): the outer ptytest spawns an inner ptytest on a
+# Dogfood meta (nested PTY): the outer pitty spawns an inner pitty on a
 # scenario that is designed to fail by timeout, and asserts the inner process
-# exits 1 (assertion failure). This proves ptytest's own failure path end to
+# exits 1 (assertion failure). This proves pitty's own failure path end to
 # end, replacing the former tests/e2e.rs `expect_times_out_on_absent_output`.
 #
-# ${PTYTEST_BIN} (absolute path to the ptytest binary) and ${INNER_DIR}
+# ${PITTY_BIN} (absolute path to the pitty binary) and ${INNER_DIR}
 # (absolute path to e2e/scenarios/meta/inner) are resolved from the PARENT
 # PROCESS ENV by the expansion fallback in src/workspace.rs::expand. Why the
 # env rather than scenario `variables`: variables are baked into this YAML and
 # cannot carry a caller-supplied absolute path, while scenario `env` is injected
 # into the spawned child rather than consulted by ${var} expansion of
-# spawn.command. The caller (CI or local) exports both vars before `ptytest run`.
+# spawn.command. The caller (CI or local) exports both vars before `pitty run`.
 #
 # Why no `workspace.temp`: temp would move cwd into a random tempdir. Inner paths
 # here are already absolute via ${INNER_DIR}, but a fixed cwd keeps the dogfood's
 # `logs/` output predictable and avoids relying on temp at all for the meta tier.
 name: verify-timeout-fails
 steps:
-  - spawn: ${PTYTEST_BIN} run ${INNER_DIR}/timeout-fail.yaml
+  - spawn: ${PITTY_BIN} run ${INNER_DIR}/timeout-fail.yaml
   # Poll for the inner exit up to the deadline instead of a fixed wait, so a
   # slow PTY teardown (notably on macOS) cannot race the judgement.
   - expect_exit:

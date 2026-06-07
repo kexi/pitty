@@ -791,7 +791,7 @@ mod tests {
     fn navigate_array_index_out_of_range_and_negative_resolve_to_none() {
         // (recommended) An array index past the end resolves to None (missing
         // path), and a negative index `[-1]` is not a digit run so it is a
-        // malformed bracket -> None (ptytest has no Python-style negative
+        // malformed bracket -> None (pitty has no Python-style negative
         // indexing). Both surface as a missing path rather than a panic or a
         // wrap-around to an unintended element.
         let root = json!({"items": [10, 20, 30]});
