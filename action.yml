@@ -20,7 +20,13 @@
 # `@main` or a SHA. Why not keep the default `main`: once `v1` exists it is the
 # stable, prebuilt-backed ref consumers should get by default. The release
 # checklist in COMPATIBILITY.md tracks the tag/asset creation order.
-name: pitty
+#
+# `name` is the GitHub Marketplace listing name and must be globally unique — it
+# cannot match an existing action, user, or org. Plain `pitty` collides with the
+# github.com/pitty user, so the listing is `pitty-action`. This is only the
+# Marketplace display name; the repo, the CLI binary, and `uses: kexi/pitty@v1`
+# are all unaffected.
+name: pitty-action
 description: Run pitty PTY-based CLI testing scenarios.
 branding:
   icon: terminal
