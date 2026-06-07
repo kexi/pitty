@@ -23,9 +23,9 @@ use reader::OutputBufferHandle;
 pub struct PtySession {
     /// The master side. Retained so it is not dropped (which would close the
     /// PTY) while the session is alive.
-    _master: Box<dyn MasterPty + Send>,
+    master: Option<Box<dyn MasterPty + Send>>,
     /// The writer used to send stdin to the child.
-    writer: Box<dyn Write + Send>,
+    writer: Option<Box<dyn Write + Send>>,
     /// The spawned child handle (wait/try_wait/kill).
     child: Box<dyn Child + Send + Sync>,
     /// Shared output buffer fed by the reader thread.
@@ -95,8 +95,8 @@ impl PtySession {
         drop(pair.slave);
 
         Ok(PtySession {
-            _master: pair.master,
-            writer,
+            master: Some(pair.master),
+            writer: Some(writer),
             child,
             output,
             reader_thread: Some(reader_thread),
@@ -123,9 +123,13 @@ impl PtySession {
     }
 
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), PittyError> {
-        self.writer
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| PittyError::Process("pty writer is closed".to_string()))?;
+        writer
             .write_all(bytes)
-            .and_then(|()| self.writer.flush())
+            .and_then(|()| writer.flush())
             .map_err(|e| PittyError::Process(format!("write to pty failed: {e}")))
     }
 
@@ -228,8 +232,11 @@ impl PtySession {
                 .map_err(|e| PittyError::Process(format!("failed to kill child: {e}")))?;
             let _ = self.child.wait();
         }
-        // Dropping the writer/master closes the PTY so the reader thread sees
-        // EOF and exits; join to avoid leaking it.
+        // Why not just join the reader thread here: Windows ConPTY may keep the
+        // read side open while the owning master/writer handles are still live,
+        // so close them before waiting for the reader to observe EOF.
+        let _ = self.writer.take();
+        let _ = self.master.take();
         if let Some(t) = self.reader_thread.take() {
             let _ = t.join();
         }

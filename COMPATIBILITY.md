@@ -60,9 +60,9 @@ parse the JSON, not the tables.
 
 As of v1.1, cutting a release is **automated** by
 [`.github/workflows/release.yml`](.github/workflows/release.yml): pushing a
-`v1.x.y` tag builds the three prebuilt binaries (Linux x86_64/aarch64, macOS
-arm64), uploads them with checksums, force-moves the floating `v1` tag to the
-release commit, and publishes a parallel `v1`-named asset set. The composite
+`v1.x.y` tag builds the four prebuilt binaries (Linux X64/ARM64, macOS ARM64,
+Windows X64), uploads them with checksums, force-moves the floating `v1` tag to
+the release commit, and publishes a parallel `v1`-named asset set. The composite
 action's `version` input therefore defaults to `v1`.
 
 The first release (v1.1.0) has run, so the `v1` tag and assets exist and
@@ -74,22 +74,26 @@ When cutting a release:
 - [ ] Bump the crate `version` in `Cargo.toml`, refresh `Cargo.lock`, and add a
       `CHANGELOG.md` entry.
 - [ ] Push the release tag (e.g. `v1.1.0`). The release workflow then, on its
-      own: creates the GitHub Release, builds the three `OS × arch` binaries,
-      uploads `pitty-<tag>-<os>-<arch>.tar.gz` (+ `.sha256`) to the release,
-      force-moves the `v1` tag to the release commit, and publishes the
-      `pitty-v1-<os>-<arch>.tar.gz` asset set to the `v1` release.
-- [ ] Verify the run is green and the six assets (three per ref: Linux
-      x86_64/aarch64, macOS arm64) are attached. The asset names are
+      own: creates the GitHub Release, builds the four `OS × arch` binaries,
+      uploads `pitty-<tag>-<runner-os>-<runner-arch>.tar.gz` (+ `.sha256`) to
+      the release, force-moves the `v1` tag to the release commit, and publishes
+      the `pitty-v1-<runner-os>-<runner-arch>.tar.gz` asset set to the `v1`
+      release.
+- [ ] Verify the run is green and the eight archives (four per ref: Linux
+      X64/ARM64, macOS ARM64, Windows X64) plus their checksums are attached.
+      The asset names are
       machine-checked against `action.yml` by
       `tests/release_asset_name_contract.rs`, but a real run also confirms the
       uploads and the tag move succeeded.
 - [ ] Post-push checks that the contract tests cannot cover statically (verify
       on the actual run/assets):
-  - [ ] `tar tzf` an uploaded asset shows the `pitty` binary at the tarball
-        **root** (no `pitty-.../` leading dir), so `action.yml`'s
-        `chmod +x "$HOME/.local/bin/pitty"` resolves.
-  - [ ] The Apple Silicon asset is named `...-Darwin-arm64.tar.gz` (raw
-        `uname -m`), not `...-aarch64-...`.
+  - [ ] `tar tzf` an uploaded Unix asset shows the `pitty` binary at the
+        tarball **root** (no `pitty-.../` leading dir), and the Windows asset
+        shows `pitty.exe` at the root, so `action.yml`'s chmod target resolves.
+  - [ ] The Apple Silicon asset is named `...-macOS-ARM64.tar.gz`, and the
+        Windows x64 asset is named `...-Windows-X64.tar.gz`; asset names use
+        GitHub `RUNNER_OS`/`RUNNER_ARCH` labels, not Rust target triples or
+        Git-Bash `uname` values.
   - [ ] On the 2nd `v*` push (the `v1` force-move), all four jobs skip
         (dotless `v1` fails the `contains('.')` guard) — no duplicate upload.
   - [ ] A consumer run's "Install pitty" log shows the prebuilt fast path

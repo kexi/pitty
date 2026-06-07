@@ -20,6 +20,7 @@
         };
         rustToolchain = devPkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rustfmt" "clippy" ];
+          targets = [ "x86_64-pc-windows-msvc" ];
         };
         pitty = pkgs.callPackage ./nix/package.nix { };
       in
@@ -51,6 +52,7 @@
             devPkgs.just
             devPkgs.lefthook
             devPkgs.gitleaks
+            devPkgs.pinact
           ];
           # Install the lefthook git hooks on entering the dev shell so the
           # gitleaks pre-commit tripwire (lefthook.yml) is wired up without a

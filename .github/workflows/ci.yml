@@ -4,9 +4,11 @@
 # rust-overlay), so every job invokes cargo through `nix develop --command` to
 # get the exact pinned Rust toolchain rather than a separately installed one.
 #
-# Action pinning: actions are pinned to a major version tag (e.g. @v6). Commit
-# SHA pinning would be stricter, but major-tag pinning keeps the workflow
-# readable while still avoiding floating `@main`; bump deliberately.
+# Action pinning: actions are pinned to immutable commit SHAs with version
+# comments. `pinact run -fix=false -verify` gates supported pins/comments, so a
+# mutable tag or stale version annotation fails CI. The sole exception is
+# dtolnay/rust-toolchain, which has no semver tag for pinact to verify; it is
+# still manually SHA-pinned and receives `toolchain: stable` explicitly.
 #
 # Nix cache choice: we use DeterminateSystems/magic-nix-cache-action. Its free
 # tier was shut down in early 2025 and later revived against GitHub's new cache
@@ -30,9 +32,13 @@ jobs:
     name: lint (fmt + clippy)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+      - name: pinact verify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: nix develop --command pinact run -fix=false -verify
       - name: cargo fmt --check
         run: nix develop --command cargo fmt --check
       - name: cargo clippy
@@ -52,7 +58,7 @@ jobs:
       # fetch-depth: 0 so the scan can resolve the PR base ref and check every
       # commit in the range — catching a secret added in an intermediate commit
       # even if a later commit removes it. On push it scans the full history.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
       # The official action over a dev-shell `run:` step: it bundles a maintained
@@ -73,21 +79,68 @@ jobs:
     name: test (unit + integration)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
       # Non-ignored tests only; the PTY-gated #[ignore] tests run in pty-e2e.
       - name: cargo test
         run: nix develop --command cargo test
+      # Cross-check Windows compilation from the pinned dev shell so non-Windows
+      # jobs catch obvious cfg/type regressions before the native Windows job
+      # reaches runtime smoke coverage.
+      - name: cargo check (Windows target)
+        run: nix develop --command cargo check --target x86_64-pc-windows-msvc --all-targets
+
+  test-windows:
+    name: test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+      # Non-ignored tests compile the Windows ConPTY backend and exercise the
+      # PTY-free contracts without assuming bash/Nix exists on Windows. Split
+      # them so a Windows-only hang names the specific target; serialize test
+      # threads because several tests intentionally mutate process env vars.
+      - name: cargo test (lib + bin)
+        timeout-minutes: 20
+        run: cargo test --lib --bins -- --test-threads=1
+      - name: cargo test (marketplace action contract)
+        timeout-minutes: 5
+        run: cargo test --test marketplace_action_contract -- --test-threads=1
+      - name: cargo test (release asset contract)
+        timeout-minutes: 5
+        run: cargo test --test release_asset_name_contract -- --test-threads=1
+      - name: cargo test (report JSON contract)
+        timeout-minutes: 5
+        run: cargo test --test report_json_contract -- --test-threads=1
+      - name: cargo test (schema contract)
+        timeout-minutes: 5
+        run: cargo test --test schema_contract -- --test-threads=1
+      - name: cargo test (file-only e2e)
+        timeout-minutes: 5
+        run: cargo test --test e2e -- --test-threads=1
+      - name: cargo build
+        run: cargo build
+      # A minimal real-PTY smoke test covers the Windows-specific runtime path:
+      # portable-pty must spawn cmd.exe through ConPTY, accept CR-terminated
+      # input, observe output, and collect the exit status.
+      - name: dogfood Windows cmd smoke
+        shell: pwsh
+        run: |
+          $env:PITTY_BIN = (Resolve-Path target/debug/pitty.exe).Path
+          & $env:PITTY_BIN run e2e/scenarios/windows
 
   pty-e2e:
     name: pty-e2e (ignored tests + dogfood)
     runs-on: ubuntu-latest
     needs: [lint, test]
     steps:
-      - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
       # GitHub Actions ubuntu runners can openpty, so the real-PTY path and the
       # nested-PTY dogfood below both work. If the nested-PTY meta tier ever
       # proves unstable on ubuntu, demote the "dogfood: meta tier" step to a
@@ -147,9 +200,9 @@ jobs:
     # expect_exit's deadline form rather than a fixed `wait` — the stabilization
     # that makes this gate non-flaky. Do NOT reintroduce continue-on-error.
     steps:
-      - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
       - name: cargo test -- --ignored
         run: nix develop --command cargo test -- --ignored
       - name: cargo build

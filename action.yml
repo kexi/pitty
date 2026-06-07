@@ -13,13 +13,13 @@
 # RELEASE NOTE (read before tagging v1.x): the default `version` input below is
 # `v1`, the floating major tag the release automation (.github/workflows/
 # release.yml) creates and force-moves on every `v1.x.y` tag push. That release
-# also publishes `pitty-v1-<os>-<arch>.tar.gz` assets to the `v1` release, so
-# this default both resolves the source fallback (`cargo install --git --tag v1`)
-# AND hits the prebuilt fast path. ORDERING: `@v1` only works after the first
-# release (v1.1.0) has run and created the `v1` tag + assets; before that, pin
-# `@main` or a SHA. Why not keep the default `main`: once `v1` exists it is the
-# stable, prebuilt-backed ref consumers should get by default. The release
-# checklist in COMPATIBILITY.md tracks the tag/asset creation order.
+# also publishes `pitty-v1-<runner-os>-<runner-arch>.tar.gz` assets to the `v1`
+# release, so this default both resolves the source fallback (`cargo install
+# --git --tag v1`) AND hits the prebuilt fast path. ORDERING: `@v1` only works
+# after the first release (v1.1.0) has run and created the `v1` tag + assets;
+# before that, pin `@main` or a SHA. Why not keep the default `main`: once `v1`
+# exists it is the stable, prebuilt-backed ref consumers should get by default.
+# The release checklist in COMPATIBILITY.md tracks the tag/asset creation order.
 #
 # `name` is the GitHub Marketplace listing name and must be globally unique — it
 # cannot match an existing action, user, or org. Plain `pitty` collides with the
@@ -47,10 +47,11 @@ inputs:
   version:
     description: >-
       pitty ref to install. Selects both the prebuilt-binary release asset
-      (`pitty-<version>-<os>-<arch>.tar.gz`) and the `cargo install --git`
-      source fallback ref. Defaults to `v1`, the floating major tag the release
-      automation maintains; pin a specific tag (e.g. `v1.1.0`) or SHA to lock a
-      version. Note `v1` only resolves after the first release publishes it.
+      (`pitty-<version>-<runner-os>-<runner-arch>.tar.gz`) and the `cargo
+      install --git` source fallback ref. Defaults to `v1`, the floating major
+      tag the release automation maintains; pin a specific tag (e.g. `v1.1.0`)
+      or SHA to lock a version. Note `v1` only resolves after the first release
+      publishes it.
     required: false
     default: v1
 
@@ -61,7 +62,9 @@ runs:
     # prebuilt binary is found, this still runs but is cheap (toolchain is
     # commonly cached on the runner).
     - name: Set up Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+      with:
+        toolchain: stable
 
     # Install pitty. Prefer a prebuilt binary from GitHub Releases when one
     # exists for this OS/arch (fast path, published by
@@ -84,30 +87,52 @@ runs:
           exit 0
         fi
 
-        os="$(uname -s)"
-        arch="$(uname -m)"
+        os="${RUNNER_OS:?RUNNER_OS is not set}"
+        arch="${RUNNER_ARCH:?RUNNER_ARCH is not set}"
         asset="pitty-${PITTY_REF}-${os}-${arch}.tar.gz"
         url="${PITTY_REPO}/releases/download/${PITTY_REF}/${asset}"
+        bin_name="pitty"
+        if [ "$os" = "Windows" ]; then
+          bin_name="pitty.exe"
+        fi
+        tmp="${RUNNER_TEMP:-/tmp}"
+        if command -v cygpath >/dev/null 2>&1; then
+          tmp="$(cygpath -u "$tmp")"
+        fi
+        mkdir -p "$tmp"
+        archive_path="${tmp}/pitty.tar.gz"
+        checksum_path="${archive_path}.sha256"
+        # GITHUB_PATH is consumed by the runner outside this Git Bash process on
+        # Windows, so write Windows-native paths there even though the installer
+        # itself uses Bash paths.
+        append_github_path() {
+          local dir="$1"
+          local path_entry="$dir"
+          if [ "$os" = "Windows" ] && command -v cygpath >/dev/null 2>&1; then
+            path_entry="$(cygpath -w "$dir")"
+          fi
+          echo "$path_entry" >> "$GITHUB_PATH"
+        }
 
         # Fast path: prebuilt binary from GitHub Releases, if published.
-        if curl -fsSL -o /tmp/pitty.tar.gz "$url" 2>/dev/null; then
+        if curl -fsSL -o "$archive_path" "$url" 2>/dev/null; then
           echo "Installing prebuilt pitty from ${url}"
 
           # Verify the tarball against the `.sha256` the release publishes
           # (upload-rust-binary-action `checksum: sha256`) before extracting, so
           # a tampered/corrupt download fails loudly instead of running. The
-          # checksum file holds `<hash>  <asset>`; we re-point its filename to
-          # the local copy. Why a fresh file instead of `-c` on the original:
-          # the published name is the asset, not /tmp/pitty.tar.gz. Why both
-          # tools: `sha256sum` is GNU/Linux, `shasum -a 256` is BSD/macOS; the
-          # runner has one or the other. If neither the checksum nor a checker
-          # is available we fail closed rather than skip verification.
-          if curl -fsSL -o /tmp/pitty.tar.gz.sha256 "${url}.sha256" 2>/dev/null; then
-            expected="$(awk '{print $1}' /tmp/pitty.tar.gz.sha256)"
+          # checksum file holds `<hash>  <asset>`, but we compare hashes
+          # directly because the local path intentionally differs. Why both
+          # tools: `sha256sum` covers GNU/Linux and Git for Windows, while
+          # `shasum -a 256` covers BSD/macOS; the runner has one or the other.
+          # If neither the checksum nor a checker is available we fail closed
+          # rather than skip verification.
+          if curl -fsSL -o "$checksum_path" "${url}.sha256" 2>/dev/null; then
+            expected="$(awk '{print $1}' "$checksum_path")"
             if command -v sha256sum >/dev/null 2>&1; then
-              actual="$(sha256sum /tmp/pitty.tar.gz | awk '{print $1}')"
+              actual="$(sha256sum "$archive_path" | awk '{print $1}')"
             elif command -v shasum >/dev/null 2>&1; then
-              actual="$(shasum -a 256 /tmp/pitty.tar.gz | awk '{print $1}')"
+              actual="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
             else
               echo "No sha256 checker (sha256sum/shasum) available to verify ${asset}" >&2
               exit 1
@@ -122,10 +147,11 @@ runs:
             exit 1
           fi
 
-          mkdir -p "$HOME/.local/bin"
-          tar -xzf /tmp/pitty.tar.gz -C "$HOME/.local/bin"
-          chmod +x "$HOME/.local/bin/pitty"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          install_dir="$HOME/.local/bin"
+          mkdir -p "$install_dir"
+          tar -xzf "$archive_path" -C "$install_dir"
+          chmod +x "$install_dir/$bin_name"
+          append_github_path "$install_dir"
           exit 0
         fi
 
@@ -155,6 +181,7 @@ runs:
         # lockfile is stale for the resolved ref.
         cargo install --git "${PITTY_REPO}" "${ref_flag}" "${PITTY_REF}" --locked pitty \
           || cargo install --git "${PITTY_REPO}" "${ref_flag}" "${PITTY_REF}" pitty
+        append_github_path "${CARGO_HOME:-$HOME/.cargo}/bin"
 
     - name: Run pitty
       shell: bash

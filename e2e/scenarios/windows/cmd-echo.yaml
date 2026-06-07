@@ -1,0 +1,13 @@
+name: windows-cmd-echo
+workspace:
+  temp: true
+steps:
+  - spawn: cmd.exe /Q
+  - send: echo PITTY_WINDOWS_OK
+  - expect:
+      contains: PITTY_WINDOWS_OK
+      timeout: 5s
+  - send: exit
+  - expect_exit:
+      code: 0
+      timeout: 5s

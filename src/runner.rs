@@ -602,6 +602,14 @@ fn mask_error(err: PittyError, secrets: &[String]) -> PittyError {
 mod tests {
     use super::*;
 
+    fn success_command() -> &'static str {
+        if cfg!(windows) {
+            "cmd.exe /C exit 0"
+        } else {
+            "true"
+        }
+    }
+
     #[test]
     fn missing_spawn_is_scenario_error() {
         // A send before any spawn must produce a Scenario error (exit code 2).
@@ -809,8 +817,11 @@ steps:
         let outside = dir.path().parent().unwrap().join("pitty-escape.snap");
         // Defensive: ensure no stale file from a prior run.
         let _ = std::fs::remove_file(&outside);
-        let yaml = "name: x\nsteps:\n  - spawn: \"true\"\n  - expect_snapshot:\n      file: ../pitty-escape.snap\n";
-        let scenario = Scenario::from_yaml(yaml).unwrap();
+        let yaml = format!(
+            "name: x\nsteps:\n  - spawn: \"{}\"\n  - expect_snapshot:\n      file: ../pitty-escape.snap\n",
+            success_command()
+        );
+        let scenario = Scenario::from_yaml(&yaml).unwrap();
         let options = RunOptions {
             update: true,
             ..RunOptions::default()
@@ -829,8 +840,11 @@ steps:
         // workspace subdirectory records under --update and is written inside the
         // workspace.
         let dir = tempfile::tempdir().unwrap();
-        let yaml = "name: x\nsteps:\n  - spawn: \"true\"\n  - expect_snapshot:\n      file: __snapshots__/x.snap\n";
-        let scenario = Scenario::from_yaml(yaml).unwrap();
+        let yaml = format!(
+            "name: x\nsteps:\n  - spawn: \"{}\"\n  - expect_snapshot:\n      file: __snapshots__/x.snap\n",
+            success_command()
+        );
+        let scenario = Scenario::from_yaml(&yaml).unwrap();
         let options = RunOptions {
             update: true,
             ..RunOptions::default()

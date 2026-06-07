@@ -293,8 +293,8 @@ pub struct Workspace {
     #[serde(default = "default_cwd")]
     pub cwd: String,
 
-    /// When true, run inside a fresh `0700` temp directory created via
-    /// `tempfile::TempDir` and cleaned up on drop.
+    /// When true, run inside a fresh temp directory created via
+    /// `tempfile::TempDir` and cleaned up on drop (`0700` on Unix).
     #[serde(default)]
     pub temp: bool,
 }

@@ -25,12 +25,20 @@ build-release:
 test:
     cargo test
 
+# Type-check the Windows target from the dev shell.
+check-windows:
+    cargo check --target x86_64-pc-windows-msvc --all-targets
+
+# Verify GitHub Actions SHA pins and version comments.
+pinact-verify:
+    pinact run -fix=false -verify
+
 # Run the PTY-gated tests too (needs a usable PTY).
 test-pty:
     cargo test -- --ignored
 
 # Format check + clippy with warnings denied (the CI lint gate).
-lint:
+lint: pinact-verify
     cargo fmt --check
     cargo clippy --all-targets -- -D warnings
 
@@ -86,5 +94,5 @@ vibe-e2e vibe_bin=`command -v vibe || true`: build
 
 # --- Aggregate -------------------------------------------------------------
 
-# Reproduce the CI gates locally: lint, test, PTY tests, and all dogfood tiers.
-ci: lint test test-pty dogfood
+# Reproduce the CI gates locally: lint, tests, Windows check, PTY tests, and dogfood tiers.
+ci: lint test check-windows test-pty dogfood
