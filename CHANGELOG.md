@@ -11,6 +11,8 @@ releases; only 1.0.0 carries a release date.
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-06-08
+
 ### Added
 
 - **Marketplace-backed minor release refs.** Release automation now moves the
