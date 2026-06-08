@@ -933,6 +933,28 @@ mod tests {
     }
 
     #[test]
+    fn expect_json_equals_accepts_yaml_structures() {
+        // Nested YAML maps and lists must deserialize to the equivalent typed
+        // JSON value for whole-structure equality checks.
+        let s = step(
+            "expect_json:\n  path: result\n  equals:\n    status: ok\n    items:\n      - 1\n      - true",
+        );
+        match s {
+            Step::ExpectJson(spec) => match spec.check {
+                JsonCheck::Equals(v) => assert_eq!(
+                    v,
+                    serde_json::json!({
+                        "status": "ok",
+                        "items": [1, true]
+                    })
+                ),
+                other => panic!("expected Equals object, got {other:?}"),
+            },
+            other => panic!("expected ExpectJson, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn expect_json_contains_with_file_source_and_timeout() {
         // contains plus a file source and a timeout must all parse.
         let s = step(

@@ -86,18 +86,28 @@ workspace:
   cwd: .                          # run dir, relative to the scenario file
   temp: true                      # OR run in a fresh temp dir (0700 on Unix)
 steps:
-  - spawn: bash                                   # or {command, cwd, env}
+  - spawn: bash
   - send: echo ${username}                        # stdin line; \r (CR) appended; ${var} expanded
   - send_raw: "y"                                 # raw bytes, no newline
   - key: enter                                    # named key -> control bytes
   - wait: 2s                                      # or 500ms
-  - expect: {contains: hello, timeout: 30s}       # wait for substring (timeout optional)
-  - expect_regex: {pattern: "hello.*world"}       # wait for regex (regex::bytes)
-  - expect_not: {contains: error}                 # immediate: must NOT be present now
-  - expect_file_exists: {path: result.txt}
-  - expect_file_contains: {path: result.txt, contains: success}
-  - expect_file_not_contains: {path: result.txt, contains: error}
-  - expect_file_changed: {path: src/auth.ts}      # content differs vs. spawn time
+  - expect:                                       # wait for substring
+      contains: hello
+      timeout: 30s                                # optional
+  - expect_regex:                                 # wait for regex (regex::bytes)
+      pattern: 'hello.*world'
+  - expect_not:                                   # immediate: must NOT be present now
+      contains: error
+  - expect_file_exists:
+      path: result.txt
+  - expect_file_contains:
+      path: result.txt
+      contains: success
+  - expect_file_not_contains:
+      path: result.txt
+      contains: error
+  - expect_file_changed:                          # content differs vs. spawn time
+      path: src/auth.ts
   - expect_exit: 0
   - expect_running: true
 ```
@@ -211,14 +221,38 @@ session directly.)
 `expect_json` extracts a JSON value and asserts on a field addressed by a path:
 
 ```yaml
-- expect_json: {path: result.status, equals: success}
-- expect_json: {path: result.message, contains: "expired"}
-- expect_json: {path: result.items, exists: true}
-- expect_json: {path: result.items.0.name, equals: first}        # dotted array index
-- expect_json: {path: 'result.items[0].name', equals: first}     # bracket array index
-- expect_json: {path: 'result["a.b"].value', equals: 7}          # key containing a dot
-- expect_json: {path: status, equals: passed, source: {file: report.json}}
-- expect_json: {path: status, equals: ok, timeout: 5s}           # wait for output JSON
+- expect_json:
+    path: result.status
+    equals: success
+- expect_json:
+    path: result.message
+    contains: expired
+- expect_json:
+    path: result.items
+    exists: true
+- expect_json:
+    path: result.items.0.name             # dotted array index
+    equals: first
+- expect_json:
+    path: 'result.items[0].name'          # bracket array index
+    equals: first
+- expect_json:
+    path: 'result["a.b"].value'           # key containing a dot
+    equals: 7
+- expect_json:
+    path: status
+    equals: passed
+    source:
+      file: report.json
+- expect_json:
+    path: status
+    equals: ok
+    timeout: 5s                           # wait for output JSON
+- expect_json:                            # YAML value, JSON comparison
+    path: result
+    equals:
+      status: success
+      items: [1, 2]
 ```
 
 - **Source.** With no `source` (the default `output`, which may also be written
