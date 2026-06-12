@@ -11,6 +11,15 @@ releases; only 1.0.0 carries a release date.
 
 ## [Unreleased]
 
+### Changed
+
+- **YAML structures are the documented form for JSON expectations.** The README
+  now writes step examples in block YAML and shows `expect_json`'s `equals`
+  taking a nested YAML map/list, which deserializes to the equivalent typed
+  JSON value for whole-structure equality. The nested form was already
+  accepted; it is now documented in the README and `SCHEMA.md` and locked in by
+  a parser test.
+
 ## [1.2.1] - 2026-06-08
 
 ### Added
