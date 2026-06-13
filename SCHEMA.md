@@ -149,6 +149,8 @@ delay, precede `expect_not` with a `wait`.
 **exactly one** of:
 
 - `equals: <value>` — typed equality (`200` is a number, `"200"` a string);
+  `<value>` may be a nested YAML map or list, which deserializes to the
+  equivalent typed JSON structure and compares the whole value at `path`;
 - `contains: <string>` — substring of the value's string form;
 - `exists: true` — the path resolves to a value.
 
