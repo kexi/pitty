@@ -8,13 +8,19 @@ workspace:
   temp: true
 steps:
   - spawn: bash
-  # Emit a line of noise, then a single-line JSON object. The expect below
-  # ensures the JSON has been written before the assertions read the buffer.
+  # Emit a line of noise, then a single-line JSON object, then a sentinel built
+  # by shell arithmetic. The PTY echoes the typed command line verbatim, so the
+  # literal JSON above also appears in the buffer as echo; gating on a substring
+  # of that JSON (e.g. "status") would match the echo before bash runs and let
+  # expect_json read a half-emitted buffer. The sentinel is `$((40+2))` in the
+  # command but `42` only in real output, so JSON_READY_42 is reached only after
+  # bash has finished printing the JSON.
   - send: >-
       echo "LOG: starting";
-      printf '%s\n' '{"result":{"status":"ok","items":[1,2,3],"message":"token expired"}}'
+      printf '%s\n' '{"result":{"status":"ok","items":[1,2,3],"message":"token expired"}}';
+      echo "JSON_READY_$((40+2))"
   - expect:
-      contains: status
+      contains: JSON_READY_42
       timeout: 10s
   - expect_json:
       path: result
