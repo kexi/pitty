@@ -23,8 +23,18 @@
 #
 # The cache authenticates to FlakeHub over OIDC, so each job that uses it also
 # grants `id-token: write`. Without that the action logs "FlakeHub Cache is
-# disabled due to missing or invalid token" and every Nix job rebuilds cold —
-# which is what happened up to v1.2.2, when only `contents: read` was granted.
+# disabled due to missing or invalid token" — which is what happened up to
+# v1.2.2, when only `contents: read` was granted.
+#
+# That grant is necessary but NOT sufficient: FlakeHub Cache itself needs a paid
+# Determinate subscription, which this repo does not have. Login now succeeds,
+# then every read returns `HTTP 401 ... "User is not authorized for this
+# resource."` and the action falls back to the GitHub Actions cache on
+# 127.0.0.1. Measured cold-vs-warm job times are unchanged, so do not expect a
+# speedup from the FlakeHub side. Keep `id-token: write` anyway — it costs
+# nothing and is the prerequisite if a subscription is ever added. If a real
+# speedup is wanted without paying, swap in nix-community/cache-nix-action,
+# which caches /nix/store through the plain GitHub Actions cache.
 name: CI
 
 on: [push, pull_request]
