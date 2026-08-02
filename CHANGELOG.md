@@ -11,6 +11,16 @@ releases; only 1.0.0 carries a release date.
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-08-02
+
+### Added
+
+- **CI gates the flake package.** A `nix-build` job runs `nix build .#default`
+  and smoke-tests the resulting binary. CI previously used Nix only as a
+  toolchain provider (`nix develop --command cargo ...`) and never evaluated
+  `nix/package.nix`, which is how the stale hash below shipped in two releases
+  undetected. `just nix-build` reproduces the gate locally.
+
 ### Changed
 
 - **YAML structures are the documented form for JSON expectations.** The README
@@ -19,6 +29,15 @@ releases; only 1.0.0 carries a release date.
   JSON value for whole-structure equality. The nested form was already
   accepted; it is now documented in the README and `SCHEMA.md` and locked in by
   a parser test.
+
+### Fixed
+
+- **Nix flake builds work again.** `nix/package.nix` carried a stale
+  `cargoHash`, so `nix build github:kexi/pitty` and `nix profile install
+  github:kexi/pitty` failed at the vendor-staging fixed-output derivation
+  throughout v1.2.0 and v1.2.1. nixpkgs' vendor staging hashes `Cargo.lock`
+  itself, so the release commits that bumped only the `pitty` version line
+  rotated the hash without touching a single dependency.
 
 ## [1.2.1] - 2026-06-08
 
