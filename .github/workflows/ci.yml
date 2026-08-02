@@ -73,6 +73,10 @@ jobs:
           purge-prefixes: nix-${{ runner.os }}-devshell-
           purge-last-accessed: 604800
           purge-created: 604800
+          # Never purge the key we just restored. Without this, a cache older
+          # than the 7d window above is deleted even while still valid, forcing
+          # a full re-upload on the next run despite an unchanged lock file.
+          purge-primary-key: never
       - name: pinact verify
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -132,6 +136,10 @@ jobs:
           purge-prefixes: nix-${{ runner.os }}-devshell-
           purge-last-accessed: 604800
           purge-created: 604800
+          # Never purge the key we just restored. Without this, a cache older
+          # than the 7d window above is deleted even while still valid, forcing
+          # a full re-upload on the next run despite an unchanged lock file.
+          purge-primary-key: never
       # Non-ignored tests only; the PTY-gated #[ignore] tests run in pty-e2e.
       - name: cargo test
         run: nix develop --command cargo test
@@ -170,6 +178,10 @@ jobs:
           purge-prefixes: nix-${{ runner.os }}-nix-build-
           purge-last-accessed: 604800
           purge-created: 604800
+          # Never purge the key we just restored. Without this, a cache older
+          # than the 7d window above is deleted even while still valid, forcing
+          # a full re-upload on the next run despite an unchanged lock file.
+          purge-primary-key: never
       # The other jobs use the flake only as a toolchain provider, so they never
       # evaluate nix/package.nix and cannot catch a stale `cargoHash`. That gap
       # let v1.2.0 and v1.2.1 ship with the README's `nix profile install
@@ -251,6 +263,10 @@ jobs:
           purge-prefixes: nix-${{ runner.os }}-devshell-
           purge-last-accessed: 604800
           purge-created: 604800
+          # Never purge the key we just restored. Without this, a cache older
+          # than the 7d window above is deleted even while still valid, forcing
+          # a full re-upload on the next run despite an unchanged lock file.
+          purge-primary-key: never
       # GitHub Actions ubuntu runners can openpty, so the real-PTY path and the
       # nested-PTY dogfood below both work. If the nested-PTY meta tier ever
       # proves unstable on ubuntu, demote the "dogfood: meta tier" step to a
@@ -328,6 +344,10 @@ jobs:
           purge-prefixes: nix-${{ runner.os }}-devshell-
           purge-last-accessed: 604800
           purge-created: 604800
+          # Never purge the key we just restored. Without this, a cache older
+          # than the 7d window above is deleted even while still valid, forcing
+          # a full re-upload on the next run despite an unchanged lock file.
+          purge-primary-key: never
       - name: cargo test -- --ignored
         run: nix develop --command cargo test -- --ignored
       - name: cargo build
