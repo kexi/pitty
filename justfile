@@ -35,9 +35,11 @@ pinact-verify:
 
 # Build the flake package (what `nix profile install` produces) and smoke it.
 # Fails on a stale `cargoHash` in nix/package.nix — see CONTRIBUTING.md.
+# Writes the out-link under target/ instead of ./result so `just ci` does not
+# drop a stray symlink in the working tree; CI uses the plain `./result` default.
 nix-build:
-    nix build .#default
-    ./result/bin/pitty --version
+    nix build .#default --out-link target/nix-result
+    ./target/nix-result/bin/pitty --version
 
 # Run the PTY-gated tests too (needs a usable PTY).
 test-pty:
