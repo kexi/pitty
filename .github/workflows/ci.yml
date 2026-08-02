@@ -30,6 +30,11 @@
 # Two keys, because the jobs realise two different closures: `devshell` for the
 # four `nix develop` jobs, `nix-build` for the package build. `purge` needs
 # `actions: write` or superseded entries accumulate against the quota again.
+#
+# Measured on the swap (cold -> warm): nix-build 118s -> 28s, lint 106s -> 69s,
+# pty-e2e (macOS) 369s -> 305s; ~923s -> ~712s summed across jobs, from two
+# cache entries totalling ~1.1GB. Note the first run after a flake.lock or
+# Cargo.lock change is always cold — it populates the new key.
 name: CI
 
 on: [push, pull_request]
