@@ -18,8 +18,9 @@ releases; only 1.0.0 carries a release date.
 - **CI gates the flake package.** A `nix-build` job runs `nix build .#default`
   and smoke-tests the resulting binary. CI previously used Nix only as a
   toolchain provider (`nix develop --command cargo ...`) and never evaluated
-  `nix/package.nix`, which is how the stale hash below shipped in two releases
-  undetected. `just nix-build` reproduces the gate locally.
+  `nix/package.nix`, which is how the stale `cargoHash` fixed in this release
+  shipped undetected in two of them. `just nix-build` reproduces the gate
+  locally.
 
 ### Changed
 
