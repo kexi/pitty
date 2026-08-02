@@ -3,6 +3,10 @@
 # Toolchain comes from the repo's `nix develop` shell (flake-utils +
 # rust-overlay), so every job invokes cargo through `nix develop --command` to
 # get the exact pinned Rust toolchain rather than a separately installed one.
+# The `nix-build` job is the exception: it builds the flake *package*
+# (nix/package.nix) rather than borrowing the shell's toolchain, because that is
+# the artifact `nix profile install github:kexi/pitty` produces and nothing else
+# in CI evaluates it.
 #
 # Action pinning: actions are pinned to immutable commit SHAs with version
 # comments. `pinact run -fix=false -verify` gates supported pins/comments, so a
@@ -16,6 +20,13 @@
 # It is configured to fail soft (a cache fault must not fail the build); if it
 # regresses, drop the cache step (build is correct without it, only slower) or
 # swap in nix-community/cache-nix-action.
+#
+# Known-inactive as of v1.2.2: the action reports "FlakeHub Cache is disabled
+# due to missing or invalid token" because the workflow grants only
+# `contents: read` and FlakeHub also needs `id-token: write` for OIDC. Every Nix
+# job therefore rebuilds cold today. Fixing that is a follow-up (it widens the
+# token scope, so it wants its own review) — noted here so the fail-soft comment
+# above is not misread as "the cache is working".
 name: CI
 
 on: [push, pull_request]
@@ -90,6 +101,32 @@ jobs:
       # reaches runtime smoke coverage.
       - name: cargo check (Windows target)
         run: nix develop --command cargo check --target x86_64-pc-windows-msvc --all-targets
+
+  nix-build:
+    name: nix-build (flake package)
+    runs-on: ubuntu-latest
+    # Deliberately no `needs:`. Unlike pty-e2e, this gate shares no setup with
+    # lint/test and only reads Cargo.lock, so serializing it behind them would
+    # add its full cold-build time to the critical path for no ordering benefit.
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+      # The other jobs use the flake only as a toolchain provider, so they never
+      # evaluate nix/package.nix and cannot catch a stale `cargoHash`. That gap
+      # let v1.2.0 and v1.2.1 ship with the README's `nix profile install
+      # github:kexi/pitty` path broken. `nix build .#default` (not `nix flake
+      # check`) is the gate: checks.pitty is the same derivation, but flake check
+      # also drags in the devShell's separate rust-overlay toolchain for no extra
+      # signal here — and this is the exact command the README tells users to run.
+      # Ubuntu-only: the vendor hash is a pure function of Cargo.lock and does not
+      # vary by system, so a macOS copy would cost double for no added coverage.
+      - name: nix build
+        run: nix build .#default
+      # Catch a build that succeeds but yields a broken artifact (missing bin or
+      # a wrong meta.mainProgram), which the derivation alone would not surface.
+      - name: pitty --version
+        run: ./result/bin/pitty --version
 
   test-windows:
     name: test (Windows)

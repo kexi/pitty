@@ -78,6 +78,11 @@ When cutting a release:
 
 - [ ] Bump the crate `version` in `Cargo.toml`, refresh `Cargo.lock`, and add a
       `CHANGELOG.md` entry.
+- [ ] Run `nix build .#default` and, if Nix reports a hash mismatch, update
+      `cargoHash` in [`nix/package.nix`](nix/package.nix). Refreshing
+      `Cargo.lock` rotates the vendor hash **even when no dependency changed** —
+      the bumped `pitty` version line alone is enough. CI's `nix-build` job
+      gates this, but catching it here keeps the release commit green.
 - [ ] Push the release tag (e.g. `v1.2.1`). The release workflow then, on its
       own: creates the GitHub Release, builds the four `OS × arch` binaries,
       uploads `pitty-<tag>-<runner-os>-<runner-arch>.tar.gz` (+ `.sha256`) to

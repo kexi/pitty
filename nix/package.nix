@@ -20,7 +20,12 @@ rustPlatform.buildRustPackage rec {
   src = source;
   inherit version;
 
-  cargoHash = "sha256-r4/DPK04imr8d9mYmBLdf5xXeaOW7k8Yo8zNEZL7E7E=";
+  # Rotates on *any* Cargo.lock change, not just dependency upgrades: nixpkgs'
+  # vendor staging hashes Cargo.lock itself, so a release commit that bumps only
+  # the `pitty` version line invalidates this too. That is exactly how v1.2.0 and
+  # v1.2.1 shipped an unbuildable flake. Re-run `nix build .#default` after every
+  # lock change and paste the hash Nix reports; CI's `nix-build` job gates it.
+  cargoHash = "sha256-4Zmb0ooHd1jb4EDSDZzd0vVFRoobi6gZUj+GwOqFsKg=";
 
   meta = {
     description = "PTY-based CLI testing framework";
