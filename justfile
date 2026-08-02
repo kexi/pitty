@@ -33,6 +33,12 @@ check-windows:
 pinact-verify:
     pinact run -fix=false -verify
 
+# Build the flake package (what `nix profile install` produces) and smoke it.
+# Fails on a stale `cargoHash` in nix/package.nix — see CONTRIBUTING.md.
+nix-build:
+    nix build .#default
+    ./result/bin/pitty --version
+
 # Run the PTY-gated tests too (needs a usable PTY).
 test-pty:
     cargo test -- --ignored
@@ -94,5 +100,6 @@ vibe-e2e vibe_bin=`command -v vibe || true`: build
 
 # --- Aggregate -------------------------------------------------------------
 
-# Reproduce the CI gates locally: lint, tests, Windows check, PTY tests, and dogfood tiers.
-ci: lint test check-windows test-pty dogfood
+# Reproduce the CI gates locally: lint, tests, Windows check, flake package build,
+# PTY tests, and dogfood tiers.
+ci: lint test check-windows nix-build test-pty dogfood

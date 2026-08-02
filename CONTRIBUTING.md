@@ -106,6 +106,7 @@ post-push verification and the one-time GitHub Marketplace publish) lives in
 The flake exposes a source-built package and app:
 
 ```sh
+nix build .#default      # what CI gates; also the README install path
 nix build .#pitty
 nix run .#pitty -- --help
 nix flake check
@@ -117,9 +118,13 @@ nixpkgs' standard `rustPlatform.buildRustPackage`, not the dev shell's
 what nixpkgs expects for an official package.
 
 `Cargo.lock` is intentionally tracked. `pitty` is an application, and the lock
-file keeps Nix source builds reproducible. When dependencies change, rebuild the
-Nix package and update `cargoHash` in `nix/package.nix` if Nix reports a new
-vendor hash.
+file keeps Nix source builds reproducible. Whenever `Cargo.lock` changes, run
+`nix build .#default` and update `cargoHash` in `nix/package.nix` with the hash
+Nix reports. This applies to **any** lock change, not just dependency upgrades:
+nixpkgs' vendor staging hashes `Cargo.lock` itself, so a release commit that
+bumps only the `pitty` version line still rotates the hash. Skipping this is how
+v1.2.0 and v1.2.1 shipped an unbuildable flake; CI's `nix-build` job now gates
+it.
 
 For a future nixpkgs submission, copy the shape of `nix/package.nix`, set
 `version` explicitly, replace the local `src` default with `fetchFromGitHub`,
