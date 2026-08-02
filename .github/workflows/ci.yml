@@ -118,14 +118,30 @@ jobs:
     # Deliberately no `needs:`. Unlike pty-e2e, this gate shares no setup with
     # lint/test and only reads Cargo.lock, so serializing it behind them would
     # add its full cold-build time to the critical path for no ordering benefit.
-    # See the lint job for why id-token is granted per job.
+    # `actions: write` is for cache-nix-action's purge of superseded entries;
+    # the rest as per the lint job.
     permissions:
       contents: read
       id-token: write
+      actions: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+      # cache-nix-action here instead of magic-nix-cache: FlakeHub Cache needs a
+      # paid Determinate plan this repo does not have, so magic-nix-cache logs in
+      # and then 401s on every read. This one caches /nix/store through the plain
+      # GitHub Actions cache, which is free. Keyed on flake.lock + Cargo.lock
+      # because those two determine the closure this job builds; the prefix
+      # restore lets an outdated cache still seed most of the store.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-nix-build-${{ hashFiles('flake.lock', 'Cargo.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-nix-build-
+          gc-max-store-size-linux: 2G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-nix-build-
+          purge-last-accessed: 604800
+          purge-created: 604800
       # The other jobs use the flake only as a toolchain provider, so they never
       # evaluate nix/package.nix and cannot catch a stale `cargoHash`. That gap
       # let v1.2.0 and v1.2.1 ship with the README's `nix profile install
