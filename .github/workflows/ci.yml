@@ -14,17 +14,27 @@
 # dtolnay/rust-toolchain, which has no semver tag for pinact to verify; it is
 # still manually SHA-pinned and receives `toolchain: stable` explicitly.
 #
-# Nix cache choice: we use DeterminateSystems/magic-nix-cache-action. Its free
-# tier was shut down in early 2025 and later revived against GitHub's new cache
-# API, but that integration is reverse-engineered and may break without notice.
-# It is configured to fail soft (a cache fault must not fail the build); if it
-# regresses, drop the cache step (build is correct without it, only slower) or
-# swap in nix-community/cache-nix-action.
+# Nix cache choice: nix-community/cache-nix-action, which tars /nix/store into
+# the plain GitHub Actions cache. We used DeterminateSystems/magic-nix-cache
+# through v1.2.2; it cached nothing, because FlakeHub Cache needs a paid
+# Determinate plan this repo does not have, so it authenticated and then failed
+# every read with `HTTP 401 ... "User is not authorized for this resource."`.
+# Being fail-soft, it degraded silently to an uncached build.
 #
-# The cache authenticates to FlakeHub over OIDC, so each job that uses it also
-# grants `id-token: write`. Without that the action logs "FlakeHub Cache is
-# disabled due to missing or invalid token" and every Nix job rebuilds cold —
-# which is what happened up to v1.2.2, when only `contents: read` was granted.
+# Worse, it wrote one Actions-cache entry per store path while doing so: 4315
+# entries filling the repo's entire 10GB quota with data nothing could read
+# back, which then starved any other cache of room to save. Do not reintroduce
+# it without a paid plan — a cache that cannot read but still writes is worse
+# than none.
+#
+# Two keys, because the jobs realise two different closures: `devshell` for the
+# four `nix develop` jobs, `nix-build` for the package build. `purge` needs
+# `actions: write` or superseded entries accumulate against the quota again.
+#
+# Measured on the swap (cold -> warm): nix-build 118s -> 28s, lint 106s -> 69s,
+# pty-e2e (macOS) 369s -> 305s; ~923s -> ~712s summed across jobs, from two
+# cache entries totalling ~1.1GB. Note the first run after a flake.lock or
+# Cargo.lock change is always cold — it populates the new key.
 name: CI
 
 on: [push, pull_request]
@@ -40,18 +50,33 @@ jobs:
   lint:
     name: lint (fmt + clippy)
     runs-on: ubuntu-latest
-    # FlakeHub Cache authenticates over OIDC, which needs `id-token: write`.
-    # Granted per job rather than at the top level so the two jobs that do not
-    # use the cache (gitleaks, test-windows) never receive a token they have no
-    # use for. `contents: read` is restated because a job-level `permissions:`
-    # block replaces the top-level one outright instead of merging with it.
+    # `actions: write` lets cache-nix-action purge superseded entries. Granted
+    # per job rather than at the top level so the jobs that do not cache
+    # (gitleaks, test-windows) never get it. `contents: read` is restated
+    # because a job-level `permissions:` block replaces the top-level one
+    # outright instead of merging with it.
     permissions:
       contents: read
-      id-token: write
+      actions: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+      # Shared key across the four dev-shell jobs: they all realise the same
+      # `nix develop` closure, so one entry serves them all. nix-build is keyed
+      # separately because it builds the package closure instead.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-devshell-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-devshell-
+          gc-max-store-size-linux: 2G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-devshell-
+          purge-last-accessed: 604800
+          purge-created: 604800
+          # Never purge the key we just restored. Without this, a cache older
+          # than the 7d window above is deleted even while still valid, forcing
+          # a full re-upload on the next run despite an unchanged lock file.
+          purge-primary-key: never
       - name: pinact verify
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -95,14 +120,26 @@ jobs:
   test:
     name: test (unit + integration)
     runs-on: ubuntu-latest
-    # See the lint job for why id-token is granted per job.
+    # See the lint job for the permissions and cache-key rationale.
     permissions:
       contents: read
-      id-token: write
+      actions: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-devshell-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-devshell-
+          gc-max-store-size-linux: 2G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-devshell-
+          purge-last-accessed: 604800
+          purge-created: 604800
+          # Never purge the key we just restored. Without this, a cache older
+          # than the 7d window above is deleted even while still valid, forcing
+          # a full re-upload on the next run despite an unchanged lock file.
+          purge-primary-key: never
       # Non-ignored tests only; the PTY-gated #[ignore] tests run in pty-e2e.
       - name: cargo test
         run: nix develop --command cargo test
@@ -118,14 +155,33 @@ jobs:
     # Deliberately no `needs:`. Unlike pty-e2e, this gate shares no setup with
     # lint/test and only reads Cargo.lock, so serializing it behind them would
     # add its full cold-build time to the critical path for no ordering benefit.
-    # See the lint job for why id-token is granted per job.
+    # `actions: write` is for cache-nix-action's purge of superseded entries;
+    # the rest as per the lint job.
     permissions:
       contents: read
-      id-token: write
+      actions: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+      # cache-nix-action here instead of magic-nix-cache: FlakeHub Cache needs a
+      # paid Determinate plan this repo does not have, so magic-nix-cache logs in
+      # and then 401s on every read. This one caches /nix/store through the plain
+      # GitHub Actions cache, which is free. Keyed on flake.lock + Cargo.lock
+      # because those two determine the closure this job builds; the prefix
+      # restore lets an outdated cache still seed most of the store.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-nix-build-${{ hashFiles('flake.lock', 'Cargo.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-nix-build-
+          gc-max-store-size-linux: 2G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-nix-build-
+          purge-last-accessed: 604800
+          purge-created: 604800
+          # Never purge the key we just restored. Without this, a cache older
+          # than the 7d window above is deleted even while still valid, forcing
+          # a full re-upload on the next run despite an unchanged lock file.
+          purge-primary-key: never
       # The other jobs use the flake only as a toolchain provider, so they never
       # evaluate nix/package.nix and cannot catch a stale `cargoHash`. That gap
       # let v1.2.0 and v1.2.1 ship with the README's `nix profile install
@@ -191,11 +247,26 @@ jobs:
     # See the lint job for why id-token is granted per job.
     permissions:
       contents: read
-      id-token: write
+      actions: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+      # See the lint job. `runner.os` in the key keeps the macOS closure in its
+      # own entry rather than thrashing against the Linux one.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-devshell-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-devshell-
+          gc-max-store-size-linux: 2G
+          gc-max-store-size-macos: 2G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-devshell-
+          purge-last-accessed: 604800
+          purge-created: 604800
+          # Never purge the key we just restored. Without this, a cache older
+          # than the 7d window above is deleted even while still valid, forcing
+          # a full re-upload on the next run despite an unchanged lock file.
+          purge-primary-key: never
       # GitHub Actions ubuntu runners can openpty, so the real-PTY path and the
       # nested-PTY dogfood below both work. If the nested-PTY meta tier ever
       # proves unstable on ubuntu, demote the "dogfood: meta tier" step to a
@@ -257,11 +328,26 @@ jobs:
     # See the lint job for why id-token is granted per job.
     permissions:
       contents: read
-      id-token: write
+      actions: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+      # See the lint job. `runner.os` in the key keeps the macOS closure in its
+      # own entry rather than thrashing against the Linux one.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-devshell-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-devshell-
+          gc-max-store-size-linux: 2G
+          gc-max-store-size-macos: 2G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-devshell-
+          purge-last-accessed: 604800
+          purge-created: 604800
+          # Never purge the key we just restored. Without this, a cache older
+          # than the 7d window above is deleted even while still valid, forcing
+          # a full re-upload on the next run despite an unchanged lock file.
+          purge-primary-key: never
       - name: cargo test -- --ignored
         run: nix develop --command cargo test -- --ignored
       - name: cargo build
