@@ -21,12 +21,10 @@
 # regresses, drop the cache step (build is correct without it, only slower) or
 # swap in nix-community/cache-nix-action.
 #
-# Known-inactive as of v1.2.2: the action reports "FlakeHub Cache is disabled
-# due to missing or invalid token" because the workflow grants only
-# `contents: read` and FlakeHub also needs `id-token: write` for OIDC. Every Nix
-# job therefore rebuilds cold today. Fixing that is a follow-up (it widens the
-# token scope, so it wants its own review) — noted here so the fail-soft comment
-# above is not misread as "the cache is working".
+# The cache authenticates to FlakeHub over OIDC, so each job that uses it also
+# grants `id-token: write`. Without that the action logs "FlakeHub Cache is
+# disabled due to missing or invalid token" and every Nix job rebuilds cold —
+# which is what happened up to v1.2.2, when only `contents: read` was granted.
 name: CI
 
 on: [push, pull_request]
@@ -42,6 +40,14 @@ jobs:
   lint:
     name: lint (fmt + clippy)
     runs-on: ubuntu-latest
+    # FlakeHub Cache authenticates over OIDC, which needs `id-token: write`.
+    # Granted per job rather than at the top level so the two jobs that do not
+    # use the cache (gitleaks, test-windows) never receive a token they have no
+    # use for. `contents: read` is restated because a job-level `permissions:`
+    # block replaces the top-level one outright instead of merging with it.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -89,6 +95,10 @@ jobs:
   test:
     name: test (unit + integration)
     runs-on: ubuntu-latest
+    # See the lint job for why id-token is granted per job.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -108,6 +118,10 @@ jobs:
     # Deliberately no `needs:`. Unlike pty-e2e, this gate shares no setup with
     # lint/test and only reads Cargo.lock, so serializing it behind them would
     # add its full cold-build time to the critical path for no ordering benefit.
+    # See the lint job for why id-token is granted per job.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -174,6 +188,10 @@ jobs:
     name: pty-e2e (ignored tests + dogfood)
     runs-on: ubuntu-latest
     needs: [lint, test]
+    # See the lint job for why id-token is granted per job.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -236,6 +254,10 @@ jobs:
     # than Linux, which is why the meta tier waits for inner exit via
     # expect_exit's deadline form rather than a fixed `wait` — the stabilization
     # that makes this gate non-flaky. Do NOT reintroduce continue-on-error.
+    # See the lint job for why id-token is granted per job.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
