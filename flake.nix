@@ -53,6 +53,8 @@
             devPkgs.lefthook
             devPkgs.gitleaks
             devPkgs.pinact
+            # wait-for-ci.sh (release CI gate) and its contract tests need jq.
+            devPkgs.jq
           ];
           # Install the lefthook git hooks on entering the dev shell so the
           # gitleaks pre-commit tripwire (lefthook.yml) is wired up without a
