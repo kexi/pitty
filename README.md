@@ -9,14 +9,15 @@ A PTY-based CLI testing framework.
 and stdin, and verifies streamed output, file changes, and process behavior —
 all driven by declarative YAML scenarios.
 
-> [!WARNING]
-> **`pitty` is NOT production ready.** It is an early, experimental project that
-> has not been battle-tested on real-world workloads. Although the **scenario
-> format** carries a SemVer stability promise (see [`COMPATIBILITY.md`](COMPATIBILITY.md)),
-> the tool itself may still have rough edges, breaking changes, and unhandled
-> edge cases. Use it at your own risk, and pin an exact version if you depend on
-> it. The `1.x` version number tracks the scenario-format contract, **not**
-> production maturity.
+> [!NOTE]
+> **`pitty` is production ready for supported CLI-testing workloads.** The
+> scenario format and report JSON are covered by the SemVer policy in
+> [`COMPATIBILITY.md`](COMPATIBILITY.md), every release is gated on Linux,
+> macOS, and Windows, and prebuilt archives are checksum-verified before use.
+> Pin an exact patch release for reproducible production CI. See
+> [`SUPPORT.md`](SUPPORT.md) for the supported platforms and operational scope,
+> and [`SECURITY.md`](SECURITY.md) for vulnerability reporting and security
+> update coverage.
 
 ## Why a PTY?
 
@@ -597,7 +598,7 @@ the GitHub Release matching the runner's OS/arch (fast: a tarball download, no
 compilation), and falls back to `cargo install --git` from source when no
 prebuilt asset exists for that platform. The release automation
 ([`.github/workflows/release.yml`](.github/workflows/release.yml)) publishes
-prebuilt binaries for Linux (X64, ARM64), macOS (ARM64), and Windows (X64) on
+prebuilt binaries for Linux (X64, ARM64), macOS (X64, ARM64), and Windows (X64) on
 every release and keeps both floating major (`v1`) and matching minor (`v1.x`)
 assets in step with their tags for release lines created by that workflow. The
 installer defaults to the same ref used in `uses: kexi/pitty@...`, so
