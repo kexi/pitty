@@ -25,6 +25,9 @@ releases; only 1.0.0 carries a release date.
 - **Production-readiness status.** The README now identifies the supported
   CLI-testing scope as production ready and links that claim to explicit
   compatibility, support, and security policies.
+- **Windows is a full CI gate.** The Windows job now runs the real-PTY test
+  suite and all three dogfood tiers through ConPTY, matching Linux and macOS,
+  instead of a single cmd.exe smoke scenario.
 
 ## [1.2.2] - 2026-08-02
 
