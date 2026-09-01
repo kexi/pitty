@@ -8,9 +8,11 @@ workspace:
   temp: true
 steps:
   - spawn: bash
-  - send: echo "Authentication failed due to an expired token"
+  # The gate needle is computed (see echo-flow.yaml) so expect_semantic runs
+  # against real output, not merely the echo of the typed command.
+  - send: echo "Authentication failed due to an expired token $((40+2))"
   - expect:
-      contains: Authentication
+      contains: token 42
       timeout: 10s
   - expect_semantic:
       text: |

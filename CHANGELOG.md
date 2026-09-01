@@ -28,6 +28,18 @@ releases; only 1.0.0 carries a release date.
 - **Windows is a full CI gate.** The Windows job now runs the real-PTY test
   suite and all three dogfood tiers through ConPTY, matching Linux and macOS,
   instead of a single cmd.exe smoke scenario.
+- **Releases wait for CI.** The release workflow now refuses to publish until
+  a CI run of the tagged commit has succeeded on every platform.
+- **Bounded PTY teardown.** Session shutdown is capped at five seconds per
+  phase and reports a stalled teardown on stderr instead of hanging; on
+  Windows ConPTY a stalled teardown previously blocked a scenario for about
+  five minutes.
+- **Dogfood scenarios assert real output.** Every dogfood needle is now
+  computed by the shell (for example `$((40+2))`), so the PTY's echo of the
+  typed command can no longer satisfy an assertion on its own.
+- **Source fallback fails closed.** The composite action's `cargo install`
+  fallback no longer retries without `--locked` when the committed lockfile
+  cannot be used.
 
 ## [1.2.2] - 2026-08-02
 

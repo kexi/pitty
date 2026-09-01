@@ -10,10 +10,12 @@ name: matrix-shell
 workspace:
   temp: true
 matrix:
-  command: ["echo matched", "printf 'matched\\n'"]
+  command: ["echo matched-$((40+2))", "printf 'matched-%s\\n' $((40+2))"]
 steps:
   - spawn: bash
+  # Computed suffix (see positive/echo-flow.yaml): the echoed command line
+  # carries `$((40+2))`, never `matched-42`.
   - send: "${command}"
   - expect:
-      contains: matched
+      contains: matched-42
       timeout: 10s

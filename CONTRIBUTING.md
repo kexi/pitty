@@ -63,11 +63,14 @@ nix develop --command "$PITTY_BIN" run e2e/scenarios/positive   # must exit 0
 nix develop --command "$PITTY_BIN" run e2e/scenarios/meta       # must exit 0
 ```
 
-CI runs these tiers plus the residual `#[ignore]` PTY tests on **both Linux and
-macOS as required gates** via `nix develop`, so a macOS PTY regression blocks
-merges. The meta tier asserts inner exit via `expect_exit`'s deadline form so the
-macOS gate stays non-flaky despite slower PTY teardown. See
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Locally, `just dogfood`
+CI runs these tiers plus the residual `#[ignore]` PTY tests on **Linux, macOS,
+and Windows as required gates** — Linux and macOS via `nix develop`, Windows
+natively through ConPTY with Git for Windows `bash` — so a PTY regression on any
+of them blocks merges. The meta tier asserts inner exit via `expect_exit`'s
+deadline form so the slower macOS and Windows teardowns stay non-flaky. See
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). `just ci` reproduces
+the Unix gates plus the Windows cross-compile check; the native ConPTY gate
+needs a Windows machine or the CI runner. Locally, `just dogfood`
 runs all three tiers and `just ci` reproduces the full gate set.
 
 ## Security scanning
@@ -96,8 +99,10 @@ Cutting a release is automated by
 [`.github/workflows/release.yml`](.github/workflows/release.yml): pushing a
 `v1.x.y` tag creates the GitHub Release, builds the five prebuilt binaries
 (Linux X64/ARM64, macOS X64/ARM64, Windows X64), uploads them with checksums,
-force-moves the floating `v1` tag to the release commit, and publishes a
-parallel `v1`-named asset set. The full step-by-step checklist (including the
+force-moves the floating `v1` and `v1.x` tags to the release commit, and
+publishes parallel `v1`- and `v1.x`-named asset sets. Publishing waits for a
+green CI run of the tagged commit, so a platform failure blocks the release.
+The full step-by-step checklist (including the
 post-push verification and the one-time GitHub Marketplace publish) lives in
 [`COMPATIBILITY.md`](COMPATIBILITY.md).
 

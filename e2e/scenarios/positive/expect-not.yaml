@@ -6,9 +6,10 @@ workspace:
   temp: true
 steps:
   - spawn: bash
-  - send: echo ok
+  # See echo-flow.yaml for why the needle is computed rather than typed.
+  - send: echo ok-$((40+2))
   - expect:
-      contains: ok
+      contains: ok-42
       timeout: 10s
   - expect_not:
       contains: error

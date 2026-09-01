@@ -152,10 +152,14 @@ pub fn run_scenario(
         );
     }
 
-    // Tear down the session explicitly so a kill failure surfaces; ignore it if
-    // we already have a more important run error.
+    // Tear down the session explicitly so a teardown problem surfaces. It never
+    // changes the verdict — the assertions are already recorded — but silently
+    // swallowing it would hide exactly the platform stalls the bounded shutdown
+    // exists to expose, so it goes to stderr as a warning.
     if let Some(mut session) = state.session.take() {
-        let _ = session.shutdown();
+        if let Err(e) = session.shutdown() {
+            eprintln!("warning: pty teardown: {e}");
+        }
     }
 
     match run_error {

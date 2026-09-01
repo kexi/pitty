@@ -84,7 +84,7 @@ When cutting a release:
       the bumped `pitty` version line alone is enough. CI's `nix-build` job
       gates this, but catching it here keeps the release commit green.
 - [ ] Push the release tag (e.g. `v1.2.1`). The release workflow then, on its
-      own: creates the GitHub Release, builds the four `OS × arch` binaries,
+      own: creates the GitHub Release, builds the five `OS × arch` binaries,
       uploads `pitty-<tag>-<runner-os>-<runner-arch>.tar.gz` (+ `.sha256`) to
       the release, force-moves the `v1` and matching `v1.x` tags to the release
       commit, and publishes the matching `pitty-v1-...` and `pitty-v1.x-...`

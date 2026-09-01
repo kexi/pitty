@@ -3,9 +3,11 @@ workspace:
   temp: true
 steps:
   - spawn: cmd.exe /Q
-  - send: echo PITTY_WINDOWS_OK
+  # `%ERRORLEVEL%` expands only when cmd runs the line, so the needle is absent
+  # from the echoed input and present only in real output (`..._0`).
+  - send: echo PITTY_WINDOWS_%ERRORLEVEL%
   - expect:
-      contains: PITTY_WINDOWS_OK
+      contains: PITTY_WINDOWS_0
       timeout: 5s
   - send: exit
   - expect_exit:

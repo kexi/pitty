@@ -11,12 +11,15 @@ workspace:
   temp: true
 steps:
   - spawn: bash
-  - send: echo hello
+  # Computed needle: see e2e/scenarios/positive/echo-flow.yaml.
+  - send: echo hello-$((40+2))
   - expect:
-      contains: hello
+      contains: hello-42
       timeout: 10s
   # Drive the shell to a clean exit and assert it, so each measured run
   # exercises the success path end-to-end rather than leaving the child running.
+  # Deadline form: see e2e/scenarios/positive/exit-zero.yaml.
   - send: exit
-  - wait: 500ms
-  - expect_exit: 0
+  - expect_exit:
+      code: 0
+      timeout: 10s

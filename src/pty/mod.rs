@@ -10,7 +10,8 @@ pub mod reader;
 
 use std::io::Write;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
@@ -32,7 +33,21 @@ pub struct PtySession {
     output: OutputBufferHandle,
     /// Join handle for the reader thread, joined on teardown.
     reader_thread: Option<std::thread::JoinHandle<()>>,
+    /// Set once `shutdown` has run so `Drop` does not repeat the (bounded but
+    /// non-trivial) teardown and pay its grace period a second time.
+    torn_down: bool,
 }
+
+/// Upper bound on each blocking phase of [`PtySession::shutdown`].
+///
+/// Why bound it at all: on Windows, ConPTY teardown of a Git for Windows bash
+/// child was observed to stall for about five minutes per session (both after
+/// `TerminateProcess` of an idle shell and when the shell was racing its own
+/// `exit`), which turned a 500ms scenario into a 5-minute one and hid inside
+/// the report because the runner fixes `duration_ms` before teardown. Healthy
+/// teardown on every platform is on the order of milliseconds (macOS is the
+/// slowest at ~100ms), so 5s is generous on the good path and caps the bad one.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 impl PtySession {
     /// Open a PTY and spawn `command` (a shell-style command line) within it.
@@ -100,6 +115,7 @@ impl PtySession {
             child,
             output,
             reader_thread: Some(reader_thread),
+            torn_down: false,
         })
     }
 
@@ -219,28 +235,73 @@ impl PtySession {
         &self.output
     }
 
-    /// Best-effort terminate the child and join the reader thread.
+    /// Best-effort terminate the child and join the reader thread, bounded by
+    /// [`SHUTDOWN_GRACE`] per phase.
     ///
     /// Called from `Drop`, but exposed so the runner can tear down explicitly
-    /// and surface a kill failure as a process error when it matters.
+    /// and surface a teardown problem when it matters. Every phase runs even if
+    /// an earlier one failed: returning early would leave the master handle to
+    /// be dropped on the caller's thread later, which is exactly the unbounded
+    /// block this method exists to avoid. Problems are collected and reported
+    /// together at the end.
     pub fn shutdown(&mut self) -> Result<(), PittyError> {
+        if self.torn_down {
+            return Ok(());
+        }
+        self.torn_down = true;
+        let mut problems: Vec<String> = Vec::new();
+
         // Kill only if still running; killing an already-exited child is a
         // no-op we would rather not surface as an error.
         if matches!(self.child.try_wait(), Ok(None)) {
-            self.child
-                .kill()
-                .map_err(|e| PittyError::Process(format!("failed to kill child: {e}")))?;
-            let _ = self.child.wait();
+            if let Err(e) = self.child.kill() {
+                problems.push(format!("failed to kill child: {e}"));
+            }
+            // Why poll instead of `wait()`: portable-pty's `wait` is unbounded,
+            // and on Windows `TerminateProcess` only *requests* termination — a
+            // child parked in a console read can take a long time to actually
+            // die. A bounded poll keeps a stuck child from stalling the runner.
+            match self.wait_exit_code_until(Instant::now() + SHUTDOWN_GRACE) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    problems.push(format!("child still running {SHUTDOWN_GRACE:?} after kill"))
+                }
+                Err(e) => problems.push(format!("{e}")),
+            }
         }
+
         // Why not just join the reader thread here: Windows ConPTY may keep the
         // read side open while the owning master/writer handles are still live,
         // so close them before waiting for the reader to observe EOF.
-        let _ = self.writer.take();
-        let _ = self.master.take();
-        if let Some(t) = self.reader_thread.take() {
-            let _ = t.join();
+        //
+        // Why a helper thread: dropping the master (`ClosePseudoConsole` on
+        // Windows) and joining the reader can both block indefinitely when the
+        // console host does not release the output pipe. Moving them off the
+        // caller's thread lets us wait with a deadline and abandon the teardown
+        // (leaking one thread and its handles) instead of hanging the scenario.
+        let writer = self.writer.take();
+        let master = self.master.take();
+        let reader = self.reader_thread.take();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            drop(writer);
+            drop(master);
+            if let Some(t) = reader {
+                let _ = t.join();
+            }
+            let _ = done_tx.send(());
+        });
+        if done_rx.recv_timeout(SHUTDOWN_GRACE).is_err() {
+            problems.push(format!(
+                "pty teardown still blocked after {SHUTDOWN_GRACE:?}; abandoning it"
+            ));
         }
-        Ok(())
+
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(PittyError::Process(problems.join("; ")))
+        }
     }
 }
 

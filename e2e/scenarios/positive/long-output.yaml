@@ -7,7 +7,11 @@ workspace:
   temp: true
 steps:
   - spawn: bash
-  - send: printf 'A%.0s' $(seq 1 6000); printf 'SENTINEL_END\n'
+  # The sentinel is assembled by printf so it exists only in real output; the
+  # echoed command line contains `SENTINEL_%s`, never `SENTINEL_END_42`. That
+  # keeps the >4096-byte reader path honest: the match can only land after
+  # all 6000 bytes have streamed through.
+  - send: printf 'A%.0s' $(seq 1 6000); printf 'SENTINEL_%s\n' END_$((40+2))
   - expect:
-      contains: SENTINEL_END
+      contains: SENTINEL_END_42
       timeout: 10s

@@ -16,7 +16,11 @@ matrix:
   region: ["us", "eu"]
 steps:
   - spawn: bash
-  - send: "${command} matched-${region}"
-  - expect:
-      contains: "matched-"
+  # Computed suffix (see positive/echo-flow.yaml) so the echoed input
+  # `matched-us-$((40+2))` cannot satisfy the per-cell needle.
+  - send: "${command} matched-${region}-$((40+2))"
+  # A regex rather than `contains: matched-${region}-42`: `${var}` expands in
+  # `send`, not in matchers, and the alternation still pins the cell's region.
+  - expect_regex:
+      pattern: "matched-(us|eu)-42"
       timeout: 10s

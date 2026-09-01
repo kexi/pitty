@@ -77,16 +77,63 @@ jobs:
             echo "Skipping ${tag}; release automation only publishes vMAJOR.MINOR.PATCH tags."
           fi
 
+  # Publishing must not outrun CI. The tag push also fires ci.yml, but the two
+  # workflows are independent runs, so without this job a tag whose CI fails on
+  # one platform would still publish. Waiting on a green CI run for the exact
+  # tagged commit (from either the tag push or the earlier branch push) makes
+  # Linux, macOS, and Windows real gates, as README/SUPPORT.md promise.
+  #
+  # Why poll instead of `workflow_call`: calling ci.yml from here would need the
+  # release token to carry ci.yml's `actions: write`/cache scopes, widening a
+  # write-capable token for jobs that only build and test. Polling needs only
+  # `actions: read`.
+  ci-gate:
+    name: wait for CI on the tagged commit
+    needs: [release-version]
+    if: ${{ needs.release-version.outputs.should_publish == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Wait for a successful CI run of this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Poll cadence vs. budget: a full CI run takes ~10-15 minutes; 30s
+          # polls keep the API quiet, and the job-level timeout is the ceiling.
+          while :; do
+            runs=$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow CI \
+              --commit "${GITHUB_SHA}" --limit 20 \
+              --json databaseId,status,conclusion,headBranch)
+            if [ "$(jq 'map(select(.conclusion == "success")) | length' <<<"$runs")" -gt 0 ]; then
+              echo "CI is green for ${GITHUB_SHA}:"
+              jq -r '.[] | select(.conclusion == "success") | "  run \(.databaseId) (\(.headBranch))"' <<<"$runs"
+              exit 0
+            fi
+            pending=$(jq 'map(select(.status != "completed")) | length' <<<"$runs")
+            if [ "$pending" -eq 0 ]; then
+              echo "No successful CI run for ${GITHUB_SHA} and none in progress; refusing to publish." >&2
+              jq -r '.[] | "  run \(.databaseId) (\(.headBranch)): \(.status)/\(.conclusion)"' <<<"$runs" >&2
+              exit 1
+            fi
+            echo "CI still running for ${GITHUB_SHA} (${pending} run(s) pending); waiting 30s."
+            sleep 30
+          done
+
   # Create the GitHub Release for the pushed patch tag FIRST.
   # upload-rust-binary-action only attaches assets to an existing release — if
-  # none exists it retries and then fails with "release not found". The four
+  # none exists it retries and then fails with "release not found". The five
   # parallel upload jobs would all race that failure, so one job creates the
   # release up front and they depend on it. If the release already exists, edit
   # it back to a published/latest release so reruns preserve the Marketplace-
   # visible patch version instead of letting floating releases become Latest.
   create-release:
     name: create release
-    needs: [release-version]
+    needs: [release-version, ci-gate]
     if: ${{ needs.release-version.outputs.should_publish == 'true' }}
     runs-on: ubuntu-latest
     steps:
