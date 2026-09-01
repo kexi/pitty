@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Block until the CI workflow has a successful run for one commit, or give up.
 #
 # Used by release.yml's ci-gate job so publishing cannot outrun CI. Exit 0 as
@@ -25,29 +25,29 @@ gh_bin="${CI_GATE_GH_BIN:-gh}"
 
 started=$SECONDS
 while :; do
-  runs=$("$gh_bin" run list --repo "$repo" --workflow "$workflow" \
-    --commit "$sha" --limit 20 \
-    --json databaseId,status,conclusion,headBranch)
+    runs=$("$gh_bin" run list --repo "$repo" --workflow "$workflow" \
+        --commit "$sha" --limit 20 \
+        --json databaseId,status,conclusion,headBranch)
 
-  successes=$(jq 'map(select(.conclusion == "success")) | length' <<<"$runs")
-  if [ "$successes" -gt 0 ]; then
-    echo "CI is green for ${sha}:"
-    jq -r '.[] | select(.conclusion == "success") | "  run \(.databaseId) (\(.headBranch))"' <<<"$runs"
-    exit 0
-  fi
+    successes=$(jq 'map(select(.conclusion == "success")) | length' <<<"$runs")
+    if [ "$successes" -gt 0 ]; then
+        echo "CI is green for ${sha}:"
+        jq -r '.[] | select(.conclusion == "success") | "  run \(.databaseId) (\(.headBranch))"' <<<"$runs"
+        exit 0
+    fi
 
-  pending=$(jq 'map(select(.status != "completed")) | length' <<<"$runs")
-  elapsed=$((SECONDS - started))
-  if [ "$pending" -eq 0 ] && [ "$elapsed" -ge "$discovery" ]; then
-    echo "No successful CI run for ${sha}, none in progress, and the ${discovery}s discovery window has passed; refusing to publish." >&2
-    jq -r '.[] | "  run \(.databaseId) (\(.headBranch)): \(.status)/\(.conclusion)"' <<<"$runs" >&2
-    exit 1
-  fi
+    pending=$(jq 'map(select(.status != "completed")) | length' <<<"$runs")
+    elapsed=$((SECONDS - started))
+    if [ "$pending" -eq 0 ] && [ "$elapsed" -ge "$discovery" ]; then
+        echo "No successful CI run for ${sha}, none in progress, and the ${discovery}s discovery window has passed; refusing to publish." >&2
+        jq -r '.[] | "  run \(.databaseId) (\(.headBranch)): \(.status)/\(.conclusion)"' <<<"$runs" >&2
+        exit 1
+    fi
 
-  if [ "$pending" -eq 0 ]; then
-    echo "No CI run visible yet for ${sha} (${elapsed}s into the ${discovery}s discovery window); waiting ${poll}s."
-  else
-    echo "CI still running for ${sha} (${pending} run(s) pending); waiting ${poll}s."
-  fi
-  sleep "$poll"
+    if [ "$pending" -eq 0 ]; then
+        echo "No CI run visible yet for ${sha} (${elapsed}s into the ${discovery}s discovery window); waiting ${poll}s."
+    else
+        echo "CI still running for ${sha} (${pending} run(s) pending); waiting ${poll}s."
+    fi
+    sleep "$poll"
 done

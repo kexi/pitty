@@ -22,6 +22,23 @@ use crate::error::PittyError;
 pub use matcher::{wait_for, ExpectOutcome, Matcher};
 use reader::OutputBufferHandle;
 
+/// How [`PtySession::shutdown`] ended when it did not fail outright.
+///
+/// The split exists because not every teardown problem means the same thing.
+/// A child (or its tree) that is still alive, or a reader thread that
+/// panicked, leaves the environment polluted and is a process error the
+/// verdict must reflect. A console host that merely takes longer than the
+/// grace period to release its handles after every process in the tree is
+/// already dead changes nothing about the run; it is reported, not fatal.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Teardown {
+    /// Every phase completed within its grace period.
+    Clean,
+    /// The child tree is dead but releasing the console handles exceeded the
+    /// grace period; the teardown was abandoned on its helper thread.
+    Stalled(String),
+}
+
 /// A live PTY session with a spawned child process.
 pub struct PtySession {
     /// The master side. Retained so it is not dropped (which would close the
@@ -41,8 +58,10 @@ pub struct PtySession {
     /// Windows only: the job object the child (and everything it spawns) lives
     /// in, so teardown can kill the whole tree rather than just the direct
     /// child. See [`job`] for why a plain `TerminateProcess` is not enough.
+    /// `Option` so `shutdown` can take and drop it (closing the last handle is
+    /// what makes `KILL_ON_JOB_CLOSE` fire) before the console handles go.
     #[cfg(windows)]
-    job: job::Job,
+    job: Option<job::Job>,
 }
 
 /// Upper bound on each blocking phase of [`PtySession::shutdown`].
@@ -108,14 +127,33 @@ impl PtySession {
         // it at teardown instead of keeping the pseudoconsole alive. Failing
         // closed here is deliberate: a session we cannot tear down reliably is
         // a process error, not a silently weaker session.
+        //
+        // Assignment is not atomic with process creation: portable-pty 0.8 does
+        // not expose `CREATE_SUSPENDED` or `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so
+        // a descendant the child spawns in the microseconds before this call
+        // is not a job member. That window is accepted; it is far smaller than
+        // the shell start-up that precedes any user command.
         #[cfg(windows)]
         let job = {
-            let handle = child.as_raw_handle().ok_or_else(|| {
-                PittyError::Process("spawned child has no process handle".to_string())
-            })?;
-            job::Job::new()
-                .and_then(|j| j.assign(handle).map(|()| j))
-                .map_err(|e| PittyError::Process(format!("job object setup failed: {e}")))?
+            let setup = child
+                .as_raw_handle()
+                .ok_or_else(|| "spawned child has no process handle".to_string())
+                .and_then(|handle| {
+                    job::Job::new()
+                        .and_then(|j| j.assign(handle).map(|()| j))
+                        .map_err(|e| format!("job object setup failed: {e}"))
+                });
+            match setup {
+                Ok(job) => job,
+                Err(msg) => {
+                    // Do not leak the process we just started: without a job to
+                    // reap it, the caller has no handle to it once we return.
+                    let mut child = child;
+                    let _ = child.kill();
+                    let _ = wait_child_until(&mut *child, Instant::now() + SHUTDOWN_GRACE);
+                    return Err(PittyError::Process(msg));
+                }
+            }
         };
 
         let reader = pair
@@ -143,7 +181,7 @@ impl PtySession {
             reader_thread: Some(reader_thread),
             torn_down: false,
             #[cfg(windows)]
-            job,
+            job: Some(job),
         })
     }
 
@@ -222,22 +260,7 @@ impl PtySession {
         &mut self,
         deadline: std::time::Instant,
     ) -> Result<Option<i32>, PittyError> {
-        // Poll cadence: short enough to observe a fresh exit promptly, long
-        // enough to avoid a busy loop. PTY teardown is on the order of tens of
-        // milliseconds, so 10ms keeps observation tight without spinning.
-        const POLL_INTERVAL: Duration = Duration::from_millis(10);
-        loop {
-            if let Some(code) = self.try_exit_code()? {
-                return Ok(Some(code));
-            }
-            if std::time::Instant::now() >= deadline {
-                return Ok(None);
-            }
-            // Never overshoot the deadline: cap the sleep at the remaining time
-            // so the loop's worst-case overrun is one `try_wait` call.
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            std::thread::sleep(POLL_INTERVAL.min(remaining));
-        }
+        wait_child_until(&mut *self.child, deadline)
     }
 
     /// Block until the child exits and return its exit code.
@@ -263,21 +286,46 @@ impl PtySession {
         &self.output
     }
 
-    /// Best-effort terminate the child and join the reader thread, bounded by
-    /// [`SHUTDOWN_GRACE`] per phase.
+    /// Terminate the child (tree, on Windows) and release the console, bounded
+    /// by [`SHUTDOWN_GRACE`] per phase.
     ///
     /// Called from `Drop`, but exposed so the runner can tear down explicitly
-    /// and surface a teardown problem when it matters. Every phase runs even if
-    /// an earlier one failed: returning early would leave the master handle to
-    /// be dropped on the caller's thread later, which is exactly the unbounded
-    /// block this method exists to avoid. Problems are collected and reported
-    /// together at the end.
-    pub fn shutdown(&mut self) -> Result<(), PittyError> {
+    /// and classify the outcome: `Err` for anything that leaves the child or
+    /// its tree alive (the verdict becomes a process error), [`Teardown`] for
+    /// the rest. Every phase runs even if an earlier one failed: returning
+    /// early would leave the master handle to be dropped on the caller's
+    /// thread later, which is exactly the unbounded block this method exists
+    /// to avoid.
+    pub fn shutdown(&mut self) -> Result<Teardown, PittyError> {
         if self.torn_down {
-            return Ok(());
+            return Ok(Teardown::Clean);
         }
         self.torn_down = true;
-        let mut problems: Vec<String> = Vec::new();
+        // Fatal: the environment may be polluted (a live child or tree, an
+        // unreadable status, a broken reader). Stall: only the console-handle
+        // release ran out of time after the tree was already dead.
+        let mut fatal: Vec<String> = Vec::new();
+
+        // Windows: terminate the whole job unconditionally, whatever the direct
+        // child's state — a launcher or shell that already exited can leave
+        // job members behind, and any of them keeps the console host (and the
+        // output pipe the reader blocks on) alive. Dropping the handle
+        // afterwards closes the last reference, so `KILL_ON_JOB_CLOSE` is the
+        // backstop for anything `TerminateJobObject` missed.
+        #[cfg(windows)]
+        let tree_killed = match self.job.take() {
+            Some(job) => {
+                let ok = job.terminate();
+                if let Err(e) = &ok {
+                    fatal.push(format!("failed to terminate job: {e}"));
+                }
+                drop(job);
+                ok.is_ok()
+            }
+            None => false,
+        };
+        #[cfg(not(windows))]
+        let tree_killed = false;
 
         // Kill only if still running; killing an already-exited child is a
         // no-op we would rather not surface as an error. An unreadable status
@@ -287,19 +335,18 @@ impl PtySession {
             Ok(None) => true,
             Ok(Some(_)) => false,
             Err(e) => {
-                problems.push(format!("cannot read child status: {e}"));
+                fatal.push(format!("cannot read child status: {e}"));
                 true
             }
         };
         if still_running {
-            // Windows: terminate the whole job first so grandchildren cannot
-            // outlive the direct child and keep the console host attached.
-            #[cfg(windows)]
-            if let Err(e) = self.job.terminate() {
-                problems.push(format!("failed to terminate job: {e}"));
-            }
-            if let Err(e) = self.child.kill() {
-                problems.push(format!("failed to kill child: {e}"));
+            // The direct kill is the Unix path and the Windows fallback for a
+            // job that could not be terminated; a successful job termination
+            // already covered the direct child.
+            if !tree_killed {
+                if let Err(e) = self.child.kill() {
+                    fatal.push(format!("failed to kill child: {e}"));
+                }
             }
             // Why poll instead of `wait()`: portable-pty's `wait` is unbounded,
             // and on Windows `TerminateProcess` only *requests* termination — a
@@ -308,9 +355,9 @@ impl PtySession {
             match self.wait_exit_code_until(Instant::now() + SHUTDOWN_GRACE) {
                 Ok(Some(_)) => {}
                 Ok(None) => {
-                    problems.push(format!("child still running {SHUTDOWN_GRACE:?} after kill"))
+                    fatal.push(format!("child still running {SHUTDOWN_GRACE:?} after kill"))
                 }
-                Err(e) => problems.push(format!("{e}")),
+                Err(e) => fatal.push(format!("{e}")),
             }
         }
 
@@ -336,19 +383,52 @@ impl PtySession {
             };
             let _ = done_tx.send(outcome);
         });
-        match done_rx.recv_timeout(SHUTDOWN_GRACE) {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => problems.push(e),
-            Err(_) => problems.push(format!(
-                "pty teardown still blocked after {SHUTDOWN_GRACE:?}; abandoning it"
+        let stalled = match done_rx.recv_timeout(SHUTDOWN_GRACE) {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => {
+                fatal.push(e);
+                None
+            }
+            Err(_) => Some(format!(
+                "console handles still held {SHUTDOWN_GRACE:?} after the child tree exited; abandoning their release"
             )),
-        }
+        };
 
-        if problems.is_empty() {
-            Ok(())
-        } else {
-            Err(PittyError::Process(problems.join("; ")))
+        if !fatal.is_empty() {
+            return Err(PittyError::Process(fatal.join("; ")));
         }
+        Ok(match stalled {
+            Some(msg) => Teardown::Stalled(msg),
+            None => Teardown::Clean,
+        })
+    }
+}
+
+/// Poll `child` for exit until it exits or `deadline` elapses.
+///
+/// Free function rather than a method so `spawn`'s failure path can reap a
+/// child it has not wrapped in a session yet.
+fn wait_child_until(
+    child: &mut (dyn Child + Send + Sync),
+    deadline: Instant,
+) -> Result<Option<i32>, PittyError> {
+    // Poll cadence: short enough to observe a fresh exit promptly, long
+    // enough to avoid a busy loop. PTY teardown is on the order of tens of
+    // milliseconds, so 10ms keeps observation tight without spinning.
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status.exit_code() as i32)),
+            Ok(None) => {}
+            Err(e) => return Err(PittyError::Process(format!("try_wait failed: {e}"))),
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        // Never overshoot the deadline: cap the sleep at the remaining time
+        // so the loop's worst-case overrun is one `try_wait` call.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(POLL_INTERVAL.min(remaining));
     }
 }
 

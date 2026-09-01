@@ -16,7 +16,7 @@ use crate::assert::{self, AssertionResult};
 use crate::config::{Scenario, Source, Step};
 use crate::error::PittyError;
 use crate::pty::reader::OutputBufferHandle;
-use crate::pty::{Matcher, PtySession};
+use crate::pty::{Matcher, PtySession, Teardown};
 use crate::report::{Report, Status};
 use crate::workspace::{mask_secrets, Workspace};
 
@@ -152,13 +152,21 @@ pub fn run_scenario(
         );
     }
 
-    // Tear down the session explicitly so a teardown problem surfaces. It never
-    // changes the verdict — the assertions are already recorded — but silently
-    // swallowing it would hide exactly the platform stalls the bounded shutdown
-    // exists to expose, so it goes to stderr as a warning.
+    // Tear down the session explicitly and classify the outcome. A teardown
+    // that leaves the child or its tree alive pollutes the environment for
+    // whatever runs next, so it is a process error even when every assertion
+    // passed (the log is already written above). A console host that is merely
+    // slow to release its handles after the tree died changes nothing about
+    // the run and is only reported.
     if let Some(mut session) = state.session.take() {
-        if let Err(e) = session.shutdown() {
-            eprintln!("warning: pty teardown: {e}");
+        match session.shutdown() {
+            Ok(Teardown::Clean) => {}
+            Ok(Teardown::Stalled(msg)) => eprintln!("warning: pty teardown: {msg}"),
+            Err(e) => {
+                if run_error.is_none() {
+                    run_error = Some(e);
+                }
+            }
         }
     }
 

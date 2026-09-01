@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use pitty::bench::run_bench;
 use pitty::config::Scenario;
 use pitty::matrix::run_matrix;
-use pitty::pty::{ExpectOutcome, Matcher, PtySession};
+use pitty::pty::{ExpectOutcome, Matcher, PtySession, Teardown};
 use pitty::report::Status;
 use pitty::run_scenario;
 use pitty::runner::RunOptions;
@@ -104,9 +104,10 @@ fn shutdown_is_bounded_while_child_is_exiting() {
         !session.is_running().expect("child status must be readable"),
         "the child must be gone after shutdown"
     );
-    assert!(
-        outcome.is_ok(),
-        "teardown must complete cleanly: {outcome:?}"
+    assert_eq!(
+        outcome.expect("teardown must not fail"),
+        Teardown::Clean,
+        "teardown must complete cleanly"
     );
 }
 
@@ -143,9 +144,60 @@ fn shutdown_kills_an_idle_shell_promptly() {
         !session.is_running().expect("child status must be readable"),
         "the child must be gone after shutdown"
     );
+    assert_eq!(
+        outcome.expect("teardown must not fail"),
+        Teardown::Clean,
+        "teardown must complete cleanly"
+    );
+}
+
+/// Windows: teardown must take the whole process tree with it, not just the
+/// direct child. A background loop started by the shell keeps writing a
+/// heartbeat file; once shutdown returns, the file must stop changing. This
+/// is the grandchild case that kept the console host — and the reader
+/// thread — alive for minutes before the job object existed. Windows-only
+/// because Unix has no tree kill here (a SIGKILLed shell cannot forward
+/// SIGHUP to its jobs), which is pre-existing and out of this test's scope.
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn shutdown_kills_grandchildren_on_windows() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let heartbeat = dir.path().join("heartbeat");
+    let mut session =
+        PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
+    session
+        .send_line("(while :; do date +%s%N > heartbeat; sleep 0.2; done) &")
+        .expect("send must succeed");
+    session
+        .send_line("echo up-$((40+2))")
+        .expect("send must succeed");
+    let seen = session.wait_for(&Matcher::contains("up-42"), Duration::from_secs(10));
     assert!(
-        outcome.is_ok(),
-        "teardown must complete cleanly: {outcome:?}"
+        matches!(seen, ExpectOutcome::Matched { .. }),
+        "shell must come up before teardown: {seen:?}"
+    );
+    // Prove the grandchild is actually running before the kill.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !heartbeat.exists() {
+        assert!(Instant::now() < deadline, "heartbeat loop never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let outcome = session.shutdown();
+    assert_eq!(
+        outcome.expect("teardown must not fail"),
+        Teardown::Clean,
+        "teardown must complete cleanly"
+    );
+
+    let before = std::fs::read(&heartbeat).unwrap_or_default();
+    std::thread::sleep(Duration::from_secs(1));
+    let after = std::fs::read(&heartbeat).unwrap_or_default();
+    assert_eq!(
+        before, after,
+        "the heartbeat loop must be dead after shutdown (grandchild survived)"
     );
 }
 

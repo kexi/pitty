@@ -11,6 +11,12 @@
 //! Why not `taskkill /T`: it costs a process spawn per teardown, depends on a
 //! tool being on PATH, and races PID reuse. A job handle does the same thing
 //! in-process and also covers the case where pitty itself dies unexpectedly.
+//!
+//! Known gap: the child is assigned right after `CreateProcess` returns, not
+//! atomically with it (portable-pty 0.8 exposes neither `CREATE_SUSPENDED`
+//! nor `PROC_THREAD_ATTRIBUTE_JOB_LIST`), so a descendant spawned in that
+//! window is not a member. Nested jobs are required for this to work at all
+//! on a runner that already sits in a job; that is standard since Windows 8.
 
 use std::io;
 use std::os::windows::io::RawHandle;
