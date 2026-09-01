@@ -162,10 +162,16 @@ pub fn run_scenario(
         match session.shutdown() {
             Ok(Teardown::Clean) => {}
             Ok(Teardown::Stalled(msg)) => eprintln!("warning: pty teardown: {msg}"),
-            Err(e) => {
-                if run_error.is_none() {
-                    run_error = Some(e);
-                }
+            // A process failure outranks whatever the run already recorded
+            // (the established severity order), so the earlier error is
+            // folded into the message rather than the other way round.
+            Err(teardown) => {
+                run_error = Some(match run_error.take() {
+                    Some(earlier) => {
+                        PittyError::Process(format!("{teardown}; earlier error: {earlier}"))
+                    }
+                    None => teardown,
+                });
             }
         }
     }
