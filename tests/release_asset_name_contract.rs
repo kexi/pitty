@@ -302,11 +302,28 @@ fn release_jobs_all_guard_against_floating_ref_repushes() {
     let guard = "if: ${{ needs.release-version.outputs.should_publish == 'true' }}";
     let occurrences = RELEASE_YML.matches(guard).count();
     assert_eq!(
-        occurrences, 5,
-        "all five publishing jobs (create-release, upload-assets, move-floating-tags, \
+        occurrences, 6,
+        "all six gated jobs (ci-gate, create-release, upload-assets, move-floating-tags, \
          upload-major-assets, upload-minor-assets) must carry the parsed-ref guard \
          {guard:?} (found {occurrences}); otherwise floating tag moves can re-fire \
          the trigger and recreate/re-upload colliding releases/assets"
+    );
+}
+
+/// Publishing must wait for CI on the tagged commit. The tag push fires ci.yml
+/// as an independent run, so without this dependency a red Windows (or any
+/// platform) job could not stop a release — contradicting the README's
+/// "every release is gated" claim. `create-release` is the root every upload
+/// job hangs off, so gating it gates everything.
+#[test]
+fn release_creation_waits_for_ci_gate() {
+    assert!(
+        RELEASE_YML.contains("needs: [release-version, ci-gate]"),
+        "create-release must depend on the ci-gate job"
+    );
+    assert!(
+        RELEASE_YML.contains("--workflow CI") && RELEASE_YML.contains("--commit \"${GITHUB_SHA}\""),
+        "ci-gate must look up the CI workflow runs for the exact tagged commit"
     );
 }
 

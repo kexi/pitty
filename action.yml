@@ -192,10 +192,11 @@ runs:
         fi
         echo "Resolved ref '${PITTY_REF}' as ${ref_flag}; installing from source."
 
-        # --locked uses the committed Cargo.lock; retry without it in case the
-        # lockfile is stale for the resolved ref.
-        cargo install --git "${PITTY_REPO}" "${ref_flag}" "${PITTY_REF}" --locked pitty \
-          || cargo install --git "${PITTY_REPO}" "${ref_flag}" "${PITTY_REF}" pitty
+        # --locked builds exactly the committed Cargo.lock. There is deliberately
+        # no unlocked retry: re-resolving dependencies on a stale lockfile would
+        # silently pull versions nobody reviewed, which SECURITY.md promises the
+        # source fallback never does. A ref with a stale lockfile fails here.
+        cargo install --git "${PITTY_REPO}" "${ref_flag}" "${PITTY_REF}" --locked pitty
         append_github_path "${CARGO_HOME:-$HOME/.cargo}/bin"
 
     - name: Run pitty

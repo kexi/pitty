@@ -6,7 +6,9 @@ workspace:
   temp: true
 steps:
   - spawn: bash
-  - send: echo hello
+  # `$((40+2))` keeps the needle out of the typed line: the PTY echoes input,
+  # so a literal `hello-42` would match its own echo before bash ran anything.
+  - send: echo hello-$((40+2))
   - expect:
-      contains: hello
+      contains: hello-42
       timeout: 10s

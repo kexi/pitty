@@ -6,7 +6,10 @@ workspace:
   temp: true
 steps:
   - spawn: bash
-  - send_raw: "echo grep-target-123"
+  # The digits come from shell arithmetic so the echoed line reads
+  # `grep-target-$((100+23))`, which `[0-9]+` cannot match; only the real
+  # output `grep-target-123` can.
+  - send_raw: "echo grep-target-$((100+23))"
   - key: enter
   - expect_regex:
       pattern: "grep-target-[0-9]+"

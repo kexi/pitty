@@ -102,6 +102,7 @@ vibe-e2e vibe_bin=`command -v vibe || true`: build
 
 # --- Aggregate -------------------------------------------------------------
 
-# Reproduce the CI gates locally: lint, tests, Windows check, flake package build,
-# PTY tests, and dogfood tiers.
+# Reproduce the Unix CI gates locally: lint, tests, Windows cross-compile check,
+# flake package build, PTY tests, and dogfood tiers. The native Windows ConPTY
+# gate only runs on a Windows machine (CI's test-windows job).
 ci: lint test check-windows nix-build test-pty dogfood

@@ -35,10 +35,12 @@
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use pitty::bench::run_bench;
 use pitty::config::Scenario;
 use pitty::matrix::run_matrix;
+use pitty::pty::PtySession;
 use pitty::report::Status;
 use pitty::run_scenario;
 use pitty::runner::RunOptions;
@@ -74,6 +76,33 @@ static PTY_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// tests independent.
 fn pty_lock() -> MutexGuard<'static, ()> {
     PTY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Teardown must stay bounded even when the child is racing its own exit:
+/// `send: exit` immediately followed by `shutdown` is the sequence that stalled
+/// for ~5 minutes on Windows ConPTY (Git for Windows bash). The bound is two
+/// grace periods (kill wait + handle teardown), so anything under 12s proves
+/// the cap holds; the healthy path finishes in well under a second.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn shutdown_is_bounded_while_child_is_exiting() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session =
+        PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
+    session.send_line("exit").expect("send must succeed");
+
+    let started = Instant::now();
+    // The result is deliberately not asserted: on a stalled platform shutdown
+    // reports the abandonment as an error, and that is still a pass here — the
+    // contract under test is the time bound, not a clean teardown.
+    let _ = session.shutdown();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(12),
+        "shutdown must be bounded by its grace periods, took {elapsed:?}"
+    );
 }
 
 /// An `expect` for output that never appears must time out and fail (not hang),

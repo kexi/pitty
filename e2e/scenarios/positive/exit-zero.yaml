@@ -7,5 +7,9 @@ workspace:
 steps:
   - spawn: bash
   - send: exit
-  - wait: 500ms
-  - expect_exit: 0
+  # Deadline form, not `wait` + bare `expect_exit`: shell exit is not instant
+  # (Git for Windows bash under ConPTY needs more than 500ms), and polling to
+  # a deadline removes the race instead of guessing a sleep.
+  - expect_exit:
+      code: 0
+      timeout: 10s
