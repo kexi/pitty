@@ -26,7 +26,7 @@ rustPlatform.buildRustPackage rec {
   # the `pitty` version line invalidates this too. That is exactly how v1.2.0 and
   # v1.2.1 shipped an unbuildable flake. Re-run `nix build .#default` after every
   # lock change and paste the hash Nix reports; CI's `nix-build` job gates it.
-  cargoHash = "sha256-UOdvnKhzoj1VGXEf1jHPER3GuQDtb3kqowtNGS3yxGI=";
+  cargoHash = "sha256-h4+nWoo5C3av2envOhZCSjf51a4PX9ySGWV6lkscBck=";
 
   # checkPhase runs the release-gate contract tests, which execute
   # .github/scripts/wait-for-ci.sh against a fake `gh`; the script needs jq.

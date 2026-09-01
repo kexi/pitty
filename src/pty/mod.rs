@@ -34,8 +34,10 @@ use reader::OutputBufferHandle;
 pub enum Teardown {
     /// Every phase completed within its grace period.
     Clean,
-    /// The child tree is dead but releasing the console handles exceeded the
-    /// grace period; the teardown was abandoned on its helper thread.
+    /// The child tree is proven dead (Windows: the job was terminated) but
+    /// releasing the console handles exceeded the grace period; the teardown
+    /// was abandoned on its helper thread. Never produced where the tree kill
+    /// is only best-effort (Unix): there a blocked release is fatal instead.
     Stalled(String),
 }
 
@@ -117,41 +119,57 @@ impl PtySession {
             builder.env(k, v);
         }
 
+        // Windows: create the kill-on-close job *before* the child exists, so
+        // the only work left after `CreateProcess` is the assignment itself.
+        // Anything the child spawns (a launcher's real shell, a shell's
+        // grandchildren) then dies with it at teardown instead of keeping the
+        // pseudoconsole alive. Failing closed is deliberate: a session we
+        // cannot tear down reliably is a process error, not a silently weaker
+        // session.
+        #[cfg(windows)]
+        let job = job::Job::new()
+            .map_err(|e| PittyError::Process(format!("job object setup failed: {e}")))?;
+
         let child = pair
             .slave
             .spawn_command(builder)
             .map_err(|e| PittyError::Process(format!("spawn failed: {e}")))?;
 
-        // Put the child in a kill-on-close job right away, so anything it
-        // spawns (a launcher's real shell, a shell's grandchildren) dies with
-        // it at teardown instead of keeping the pseudoconsole alive. Failing
-        // closed here is deliberate: a session we cannot tear down reliably is
-        // a process error, not a silently weaker session.
-        //
-        // Assignment is not atomic with process creation: portable-pty 0.8 does
-        // not expose `CREATE_SUSPENDED` or `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so
-        // a descendant the child spawns in the microseconds before this call
-        // is not a job member. That window is accepted; it is far smaller than
-        // the shell start-up that precedes any user command.
+        // Assignment is not atomic with process creation: portable-pty 0.8
+        // exposes neither `CREATE_SUSPENDED` nor `PROC_THREAD_ATTRIBUTE_JOB_LIST`,
+        // so a descendant the child manages to spawn before this call returns
+        // is not a job member. The window is the child's own start-up, which
+        // for every supported shell is far longer than the assignment; the
+        // residual gap is documented in `job.rs` rather than hidden.
         #[cfg(windows)]
         let job = {
-            let setup = child
+            let assigned = child
                 .as_raw_handle()
                 .ok_or_else(|| "spawned child has no process handle".to_string())
                 .and_then(|handle| {
-                    job::Job::new()
-                        .and_then(|j| j.assign(handle).map(|()| j))
-                        .map_err(|e| format!("job object setup failed: {e}"))
+                    job.assign(handle)
+                        .map_err(|e| format!("job assignment failed: {e}"))
                 });
-            match setup {
-                Ok(job) => job,
+            match assigned {
+                Ok(()) => job,
                 Err(msg) => {
                     // Do not leak the process we just started: without a job to
                     // reap it, the caller has no handle to it once we return.
+                    // Every cleanup problem is folded into the error so a child
+                    // that outlived this attempt is visible, not silent.
                     let mut child = child;
-                    let _ = child.kill();
-                    let _ = wait_child_until(&mut *child, Instant::now() + SHUTDOWN_GRACE);
-                    return Err(PittyError::Process(msg));
+                    let mut problems = vec![msg];
+                    if let Err(e) = child.kill() {
+                        problems.push(format!("cleanup kill failed: {e}"));
+                    }
+                    match wait_child_until(&mut *child, Instant::now() + SHUTDOWN_GRACE) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => problems.push(format!(
+                            "cleanup: child still running {SHUTDOWN_GRACE:?} after kill"
+                        )),
+                        Err(e) => problems.push(format!("cleanup: {e}")),
+                    }
+                    return Err(PittyError::Process(problems.join("; ")));
                 }
             }
         };
@@ -340,6 +358,21 @@ impl PtySession {
             }
         };
         if still_running {
+            // Unix: the child is a session leader (portable-pty calls setsid),
+            // so its pid names its process group. Killing the group takes the
+            // foreground descendants with it — a `sh -c` pipeline, a server
+            // the scenario started — which a kill of the leader alone would
+            // orphan. Background jobs under job control sit in their own
+            // groups and are not covered, so this is best-effort and does not
+            // count as a proven tree kill (see `tree_killed`).
+            #[cfg(unix)]
+            if let Some(pid) = self.child.process_id() {
+                // SAFETY: plain syscall; a stale pid only yields ESRCH, which
+                // is ignored because the direct kill below still runs.
+                unsafe {
+                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                }
+            }
             // The direct kill is the Unix path and the Windows fallback for a
             // job that could not be terminated; a successful job termination
             // already covered the direct child.
@@ -383,15 +416,30 @@ impl PtySession {
             };
             let _ = done_tx.send(outcome);
         });
+        // A timeout is only a benign stall when the whole tree is proven dead
+        // (Windows job terminated). Without that proof — Unix, or a Windows
+        // job that failed to terminate — a blocked reader most likely means a
+        // surviving descendant still holds the PTY, which is a live process
+        // the run leaves behind: fatal, like any other unreaped child.
         let stalled = match done_rx.recv_timeout(SHUTDOWN_GRACE) {
             Ok(Ok(())) => None,
             Ok(Err(e)) => {
                 fatal.push(e);
                 None
             }
-            Err(_) => Some(format!(
+            Err(mpsc::RecvTimeoutError::Timeout) if tree_killed => Some(format!(
                 "console handles still held {SHUTDOWN_GRACE:?} after the child tree exited; abandoning their release"
             )),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                fatal.push(format!(
+                    "pty still open {SHUTDOWN_GRACE:?} after killing the child; a descendant is probably holding it"
+                ));
+                None
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                fatal.push("pty teardown helper thread died before reporting".to_string());
+                None
+            }
         };
 
         if !fatal.is_empty() {

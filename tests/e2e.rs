@@ -167,8 +167,11 @@ fn shutdown_kills_grandchildren_on_windows() {
     let heartbeat = dir.path().join("heartbeat");
     let mut session =
         PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
+    // Shell builtins only (printf, no external `date`), so the loop cannot
+    // silently fail on a minimal PATH and leave an empty file that would
+    // compare equal before and after.
     session
-        .send_line("(while :; do date +%s%N > heartbeat; sleep 0.2; done) &")
+        .send_line("(while :; do printf x >> heartbeat; sleep 0.2; done) &")
         .expect("send must succeed");
     session
         .send_line("echo up-$((40+2))")
@@ -178,11 +181,21 @@ fn shutdown_kills_grandchildren_on_windows() {
         matches!(seen, ExpectOutcome::Matched { .. }),
         "shell must come up before teardown: {seen:?}"
     );
-    // Prove the grandchild is actually running before the kill.
+    // Prove the grandchild is actually running before the kill: the file must
+    // grow at least twice, not merely exist (a redirection creates it even if
+    // nothing is ever written).
+    let size = |path: &std::path::Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !heartbeat.exists() {
-        assert!(Instant::now() < deadline, "heartbeat loop never started");
+    let mut growths = 0;
+    let mut last = 0;
+    while growths < 2 {
+        assert!(Instant::now() < deadline, "heartbeat loop never got going");
         std::thread::sleep(Duration::from_millis(50));
+        let now = size(&heartbeat);
+        if now > last {
+            growths += 1;
+            last = now;
+        }
     }
 
     let outcome = session.shutdown();
@@ -192,9 +205,12 @@ fn shutdown_kills_grandchildren_on_windows() {
         "teardown must complete cleanly"
     );
 
-    let before = std::fs::read(&heartbeat).unwrap_or_default();
+    // Settle past any write that was in flight when the tree died, then the
+    // size must hold still for a full second.
+    std::thread::sleep(Duration::from_millis(300));
+    let before = size(&heartbeat);
     std::thread::sleep(Duration::from_secs(1));
-    let after = std::fs::read(&heartbeat).unwrap_or_default();
+    let after = size(&heartbeat);
     assert_eq!(
         before, after,
         "the heartbeat loop must be dead after shutdown (grandchild survived)"

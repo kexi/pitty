@@ -39,7 +39,9 @@ releases; only 1.0.0 carries a release date.
   direct child. A teardown that leaves the child or its tree alive is now a
   process error (exit 3) even when every assertion passed; only a console
   host that is slow to release its handles after the tree died is downgraded
-  to a stderr warning.
+  to a stderr warning. On Unix, teardown now kills the child's process group
+  (the child is a session leader), so a foreground pipeline or server the
+  scenario started no longer outlives the session.
 - **Dogfood scenarios assert real output.** Every dogfood needle is now
   computed by the shell (for example `$((40+2))`), so the PTY's echo of the
   typed command can no longer satisfy an assertion on its own.
