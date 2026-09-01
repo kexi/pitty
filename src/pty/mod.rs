@@ -359,12 +359,13 @@ impl PtySession {
         };
         if still_running {
             // Unix: the child is a session leader (portable-pty calls setsid),
-            // so its pid names its process group. Killing the group takes the
-            // foreground descendants with it — a `sh -c` pipeline, a server
-            // the scenario started — which a kill of the leader alone would
-            // orphan. Background jobs under job control sit in their own
-            // groups and are not covered, so this is best-effort and does not
-            // count as a proven tree kill (see `tree_killed`).
+            // so its pid names its process group. Killing that group takes
+            // along whatever still shares it — a `sh -c` pipeline, a plain
+            // `exec`'d server — which a kill of the leader alone would orphan.
+            // It is best-effort, not a session kill: an interactive shell's
+            // job control puts each pipeline in its own group, so those are
+            // not covered, and this never counts as a proven tree kill (see
+            // `tree_killed`).
             #[cfg(unix)]
             if let Some(pid) = self.child.process_id() {
                 // SAFETY: plain syscall; a stale pid only yields ESRCH, which
