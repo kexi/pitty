@@ -164,11 +164,17 @@ pub fn run_scenario(
             Ok(Teardown::Stalled(msg)) => eprintln!("warning: pty teardown: {msg}"),
             // A process failure outranks whatever the run already recorded
             // (the established severity order), so the earlier error is
-            // folded into the message rather than the other way round.
+            // folded into the message rather than the other way round. The
+            // teardown error's own message is unwrapped first so the combined
+            // error does not read "process error: process error: ...".
             Err(teardown) => {
                 run_error = Some(match run_error.take() {
                     Some(earlier) => {
-                        PittyError::Process(format!("{teardown}; earlier error: {earlier}"))
+                        let detail = match teardown {
+                            PittyError::Process(msg) => msg,
+                            other => other.to_string(),
+                        };
+                        PittyError::Process(format!("{detail}; earlier error: {earlier}"))
                     }
                     None => teardown,
                 });

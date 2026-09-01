@@ -167,9 +167,9 @@ fn shutdown_kills_grandchildren_on_windows() {
     let heartbeat = dir.path().join("heartbeat");
     let mut session =
         PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
-    // Shell builtins only (printf, no external `date`), so the loop cannot
-    // silently fail on a minimal PATH and leave an empty file that would
-    // compare equal before and after.
+    // The heartbeat write is the builtin `printf`, not an external `date`, so
+    // it cannot silently fail on a minimal PATH and leave an empty file that
+    // would compare equal before and after.
     session
         .send_line("(while :; do printf x >> heartbeat; sleep 0.2; done) &")
         .expect("send must succeed");
