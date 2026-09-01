@@ -348,9 +348,11 @@ fn run_wait_script(responses: &[&str], discovery_seconds: u32) -> i32 {
     }
     // The fake prints response-N on its N-th call and keeps returning the last
     // one afterwards, so a scripted sequence like [in_progress, success] models
-    // a run that finishes while the gate is polling.
+    // a run that finishes while the gate is polling. It is POSIX sh under an
+    // absolute shebang because the Nix build sandbox (which runs these tests
+    // in checkPhase) provides /bin/sh but no /usr/bin/env.
     let fake = format!(
-        "#!/usr/bin/env bash\nset -eu\ncounter=\"{dir}/calls\"\nn=$(cat \"$counter\" 2>/dev/null || echo 0)\necho $((n + 1)) > \"$counter\"\nlast={last}\nif [ \"$n\" -gt \"$last\" ]; then n=$last; fi\ncat \"{dir}/response-$n.json\"\n",
+        "#!/bin/sh\nset -eu\ncounter=\"{dir}/calls\"\nn=$(cat \"$counter\" 2>/dev/null || echo 0)\necho $((n + 1)) > \"$counter\"\nlast={last}\nif [ \"$n\" -gt \"$last\" ]; then n=$last; fi\ncat \"{dir}/response-$n.json\"\n",
         dir = dir.path().display(),
         last = responses.len() - 1
     );
