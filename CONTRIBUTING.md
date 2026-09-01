@@ -71,7 +71,7 @@ deadline form so the slower macOS and Windows teardowns stay non-flaky. See
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml). `just ci` reproduces
 the Unix gates plus the Windows cross-compile check; the native ConPTY gate
 needs a Windows machine or the CI runner. Locally, `just dogfood`
-runs all three tiers and `just ci` reproduces the full gate set.
+runs all three tiers.
 
 ## Security scanning
 

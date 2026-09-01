@@ -97,32 +97,17 @@ jobs:
       contents: read
       actions: read
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # The polling state machine lives in a script so
+      # tests/release_asset_name_contract.rs can drive it with a fake `gh`:
+      # a run that is not visible yet must be waited for (discovery window),
+      # a pending run must be waited for, and only "nothing pending after the
+      # window" refuses. The job-level timeout is the outer ceiling.
       - name: Wait for a successful CI run of this commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: |
-          set -euo pipefail
-          # Poll cadence vs. budget: a full CI run takes ~10-15 minutes; 30s
-          # polls keep the API quiet, and the job-level timeout is the ceiling.
-          while :; do
-            runs=$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow CI \
-              --commit "${GITHUB_SHA}" --limit 20 \
-              --json databaseId,status,conclusion,headBranch)
-            if [ "$(jq 'map(select(.conclusion == "success")) | length' <<<"$runs")" -gt 0 ]; then
-              echo "CI is green for ${GITHUB_SHA}:"
-              jq -r '.[] | select(.conclusion == "success") | "  run \(.databaseId) (\(.headBranch))"' <<<"$runs"
-              exit 0
-            fi
-            pending=$(jq 'map(select(.status != "completed")) | length' <<<"$runs")
-            if [ "$pending" -eq 0 ]; then
-              echo "No successful CI run for ${GITHUB_SHA} and none in progress; refusing to publish." >&2
-              jq -r '.[] | "  run \(.databaseId) (\(.headBranch)): \(.status)/\(.conclusion)"' <<<"$runs" >&2
-              exit 1
-            fi
-            echo "CI still running for ${GITHUB_SHA} (${pending} run(s) pending); waiting 30s."
-            sleep 30
-          done
+        run: .github/scripts/wait-for-ci.sh "${GITHUB_SHA}"
 
   # Create the GitHub Release for the pushed patch tag FIRST.
   # upload-rust-binary-action only attaches assets to an existing release — if

@@ -20,7 +20,12 @@ steps:
   # `matched-us-$((40+2))` cannot satisfy the per-cell needle.
   - send: "${command} matched-${region}-$((40+2))"
   # A regex rather than `contains: matched-${region}-42`: `${var}` expands in
-  # `send`, not in matchers, and the alternation still pins the cell's region.
+  # `send`, not in matcher fields, so the needle cannot name the cell's own
+  # region. The alternation proves the injected value is one of the axis
+  # values and that the line was produced by execution (the echo carries
+  # `$((40+2))`, never `42`); it does not distinguish the us cell from the eu
+  # cell. Per-cell matching would need matcher expansion, which is not part of
+  # the scenario contract.
   - expect_regex:
       pattern: "matched-(us|eu)-42"
       timeout: 10s

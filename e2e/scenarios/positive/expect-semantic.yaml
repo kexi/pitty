@@ -8,13 +8,19 @@ workspace:
   temp: true
 steps:
   - spawn: bash
-  # The gate needle is computed (see echo-flow.yaml) so expect_semantic runs
-  # against real output, not merely the echo of the typed command.
-  - send: echo "Authentication failed due to an expired token $((40+2))"
+  # The message is assembled by printf from separate words and written to a
+  # workspace file, and expect_semantic reads that file. The PTY buffer is not
+  # the comparison source, so neither the echoed command line nor the shell's
+  # platform-dependent startup output (prompt, locale notices) can satisfy or
+  # dilute the similarity. The computed sentinel (see echo-flow.yaml) proves
+  # the write finished before the comparison runs.
+  - send: printf '%s failed due to an %s token\n' Authentication expired > semantic.txt; echo WRITTEN_$((40+2))
   - expect:
-      contains: token 42
+      contains: WRITTEN_42
       timeout: 10s
   - expect_semantic:
       text: |
         authentication failed expired token
       similarity: 0.5
+      source:
+        file: semantic.txt
