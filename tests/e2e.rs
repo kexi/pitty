@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use pitty::bench::run_bench;
 use pitty::config::Scenario;
 use pitty::matrix::run_matrix;
-use pitty::pty::PtySession;
+use pitty::pty::{ExpectOutcome, Matcher, PtySession};
 use pitty::report::Status;
 use pitty::run_scenario;
 use pitty::runner::RunOptions;
@@ -93,15 +93,59 @@ fn shutdown_is_bounded_while_child_is_exiting() {
     session.send_line("exit").expect("send must succeed");
 
     let started = Instant::now();
-    // The result is deliberately not asserted: on a stalled platform shutdown
-    // reports the abandonment as an error, and that is still a pass here — the
-    // contract under test is the time bound, not a clean teardown.
-    let _ = session.shutdown();
+    let outcome = session.shutdown();
     let elapsed = started.elapsed();
 
     assert!(
         elapsed < Duration::from_secs(12),
         "shutdown must be bounded by its grace periods, took {elapsed:?}"
+    );
+    assert!(
+        !session.is_running().expect("child status must be readable"),
+        "the child must be gone after shutdown"
+    );
+    assert!(
+        outcome.is_ok(),
+        "teardown must complete cleanly: {outcome:?}"
+    );
+}
+
+/// The common teardown: an idle interactive shell that never asked to exit is
+/// killed, its tree reaped, and the console handles released — promptly and
+/// without reporting a stall.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn shutdown_kills_an_idle_shell_promptly() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session =
+        PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
+    // Wait for the shell to actually be up (a computed needle that only a
+    // running shell can print), so the kill hits a live, idle shell.
+    session
+        .send_line("echo up-$((40+2))")
+        .expect("send must succeed");
+    let seen = session.wait_for(&Matcher::contains("up-42"), Duration::from_secs(10));
+    assert!(
+        matches!(seen, ExpectOutcome::Matched { .. }),
+        "shell must come up before teardown: {seen:?}"
+    );
+
+    let started = Instant::now();
+    let outcome = session.shutdown();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(12),
+        "shutdown must be bounded by its grace periods, took {elapsed:?}"
+    );
+    assert!(
+        !session.is_running().expect("child status must be readable"),
+        "the child must be gone after shutdown"
+    );
+    assert!(
+        outcome.is_ok(),
+        "teardown must complete cleanly: {outcome:?}"
     );
 }
 

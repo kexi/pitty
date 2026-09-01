@@ -33,7 +33,10 @@ releases; only 1.0.0 carries a release date.
 - **Bounded PTY teardown.** Session shutdown is capped at five seconds per
   phase and reports a stalled teardown on stderr instead of hanging; on
   Windows ConPTY a stalled teardown previously blocked a scenario for about
-  five minutes.
+  five minutes. On Windows the child now runs inside a kill-on-close job
+  object, so teardown terminates the whole process tree (for example the real
+  shell behind Git for Windows' `bin\bash.exe` launcher) rather than only the
+  direct child.
 - **Dogfood scenarios assert real output.** Every dogfood needle is now
   computed by the shell (for example `$((40+2))`), so the PTY's echo of the
   typed command can no longer satisfy an assertion on its own.

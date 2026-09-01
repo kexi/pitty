@@ -322,9 +322,108 @@ fn release_creation_waits_for_ci_gate() {
         "create-release must depend on the ci-gate job"
     );
     assert!(
-        RELEASE_YML.contains("--workflow CI") && RELEASE_YML.contains("--commit \"${GITHUB_SHA}\""),
-        "ci-gate must look up the CI workflow runs for the exact tagged commit"
+        RELEASE_YML.contains(".github/scripts/wait-for-ci.sh \"${GITHUB_SHA}\""),
+        "ci-gate must run the wait script against the exact tagged commit"
     );
+    assert!(
+        WAIT_FOR_CI_SH.contains("--workflow \"$workflow\"")
+            && WAIT_FOR_CI_SH.contains("--commit \"$sha\""),
+        "the wait script must filter CI runs by workflow and commit"
+    );
+}
+
+const WAIT_FOR_CI_SH: &str = include_str!("../.github/scripts/wait-for-ci.sh");
+
+/// Drive the wait script with a fake `gh` whose answers are scripted per call,
+/// returning the script's exit status. Unix-only: it needs bash and jq, which
+/// the release job (ubuntu-latest) and the dev shell both have.
+#[cfg(unix)]
+fn run_wait_script(responses: &[&str], discovery_seconds: u32) -> i32 {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    for (i, body) in responses.iter().enumerate() {
+        std::fs::write(dir.path().join(format!("response-{i}.json")), body).unwrap();
+    }
+    // The fake prints response-N on its N-th call and keeps returning the last
+    // one afterwards, so a scripted sequence like [in_progress, success] models
+    // a run that finishes while the gate is polling.
+    let fake = format!(
+        "#!/usr/bin/env bash\nset -eu\ncounter=\"{dir}/calls\"\nn=$(cat \"$counter\" 2>/dev/null || echo 0)\necho $((n + 1)) > \"$counter\"\nlast={last}\nif [ \"$n\" -gt \"$last\" ]; then n=$last; fi\ncat \"{dir}/response-$n.json\"\n",
+        dir = dir.path().display(),
+        last = responses.len() - 1
+    );
+    let gh = bin.join("gh");
+    std::fs::write(&gh, fake).unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/scripts/wait-for-ci.sh");
+    std::process::Command::new("bash")
+        .arg(script)
+        .arg("deadbeef")
+        .env("GITHUB_REPOSITORY", "kexi/pitty")
+        .env("CI_GATE_GH_BIN", &gh)
+        .env("CI_GATE_POLL_SECONDS", "0")
+        .env("CI_GATE_DISCOVERY_SECONDS", discovery_seconds.to_string())
+        .status()
+        .expect("bash must be available to run the wait script")
+        .code()
+        .expect("script must exit with a code")
+}
+
+#[cfg(unix)]
+const RUN_SUCCESS: &str =
+    r#"[{"databaseId":1,"status":"completed","conclusion":"success","headBranch":"v1.2.3"}]"#;
+#[cfg(unix)]
+const RUN_FAILED: &str =
+    r#"[{"databaseId":1,"status":"completed","conclusion":"failure","headBranch":"v1.2.3"}]"#;
+#[cfg(unix)]
+const RUN_PENDING: &str =
+    r#"[{"databaseId":1,"status":"in_progress","conclusion":null,"headBranch":"v1.2.3"}]"#;
+
+/// A green run passes the gate immediately.
+#[cfg(unix)]
+#[test]
+fn ci_gate_passes_on_a_successful_run() {
+    assert_eq!(run_wait_script(&[RUN_SUCCESS], 0), 0);
+}
+
+/// A run that is still in progress is waited for, and its eventual success
+/// passes the gate — the pending state must never be treated as final.
+#[cfg(unix)]
+#[test]
+fn ci_gate_waits_for_a_pending_run_to_succeed() {
+    assert_eq!(
+        run_wait_script(&[RUN_PENDING, RUN_PENDING, RUN_SUCCESS], 0),
+        0
+    );
+}
+
+/// Right after a tag push the runs API can lag; an empty list inside the
+/// discovery window is not a verdict, so the gate keeps polling and passes
+/// once the run appears and succeeds.
+#[cfg(unix)]
+#[test]
+fn ci_gate_tolerates_a_run_that_is_not_visible_yet() {
+    assert_eq!(run_wait_script(&["[]", "[]", RUN_SUCCESS], 60), 0);
+}
+
+/// With the discovery window elapsed, no run at all means no evidence of a
+/// green CI, so the gate refuses rather than publishing on hope.
+#[cfg(unix)]
+#[test]
+fn ci_gate_refuses_when_no_run_exists_after_the_window() {
+    assert_eq!(run_wait_script(&["[]"], 0), 1);
+}
+
+/// Only failed runs, nothing pending, window elapsed: refuse. This is the
+/// case the gate exists for — a red platform job must block the release.
+#[cfg(unix)]
+#[test]
+fn ci_gate_refuses_when_only_failed_runs_exist() {
+    assert_eq!(run_wait_script(&[RUN_FAILED], 0), 1);
 }
 
 #[test]

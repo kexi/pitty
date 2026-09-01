@@ -30,4 +30,10 @@ tempfile = "3"
 # MIT license.
 similar = "2"
 
+# Job objects for killing the whole process tree under a ConPTY session on
+# teardown. winapi is already in the graph through portable-pty, so this adds
+# feature flags, not a crate.
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["handleapi", "jobapi2", "winnt"] }
+
 [dev-dependencies]

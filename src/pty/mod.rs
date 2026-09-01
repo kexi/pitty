@@ -5,6 +5,8 @@
 //! condvar handshake) is hidden behind [`PtySession::wait_for`]. This keeps the
 //! async complexity contained while exposing a simple, testable contract.
 
+#[cfg(windows)]
+mod job;
 pub mod matcher;
 pub mod reader;
 
@@ -36,17 +38,26 @@ pub struct PtySession {
     /// Set once `shutdown` has run so `Drop` does not repeat the (bounded but
     /// non-trivial) teardown and pay its grace period a second time.
     torn_down: bool,
+    /// Windows only: the job object the child (and everything it spawns) lives
+    /// in, so teardown can kill the whole tree rather than just the direct
+    /// child. See [`job`] for why a plain `TerminateProcess` is not enough.
+    #[cfg(windows)]
+    job: job::Job,
 }
 
 /// Upper bound on each blocking phase of [`PtySession::shutdown`].
 ///
 /// Why bound it at all: on Windows, ConPTY teardown of a Git for Windows bash
-/// child was observed to stall for about five minutes per session (both after
-/// `TerminateProcess` of an idle shell and when the shell was racing its own
-/// `exit`), which turned a 500ms scenario into a 5-minute one and hid inside
-/// the report because the runner fixes `duration_ms` before teardown. Healthy
-/// teardown on every platform is on the order of milliseconds (macOS is the
-/// slowest at ~100ms), so 5s is generous on the good path and caps the bad one.
+/// child was observed to stall for about five minutes per session, which
+/// turned a 500ms scenario into a 5-minute one and hid inside the report
+/// because the runner fixes `duration_ms` before teardown. CI diagnostics
+/// placed the stall in the handle-teardown phase — the console host kept the
+/// output pipe open after the direct child had been terminated, consistent
+/// with another process still attached to the pseudoconsole — which is why
+/// Windows now terminates the child's whole job (tree) first. The bound stays
+/// as the backstop for whatever the console host does next. Healthy teardown
+/// on every platform is on the order of milliseconds (macOS is the slowest at
+/// ~100ms), so 5s is generous on the good path and caps the bad one.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 impl PtySession {
@@ -92,6 +103,21 @@ impl PtySession {
             .spawn_command(builder)
             .map_err(|e| PittyError::Process(format!("spawn failed: {e}")))?;
 
+        // Put the child in a kill-on-close job right away, so anything it
+        // spawns (a launcher's real shell, a shell's grandchildren) dies with
+        // it at teardown instead of keeping the pseudoconsole alive. Failing
+        // closed here is deliberate: a session we cannot tear down reliably is
+        // a process error, not a silently weaker session.
+        #[cfg(windows)]
+        let job = {
+            let handle = child.as_raw_handle().ok_or_else(|| {
+                PittyError::Process("spawned child has no process handle".to_string())
+            })?;
+            job::Job::new()
+                .and_then(|j| j.assign(handle).map(|()| j))
+                .map_err(|e| PittyError::Process(format!("job object setup failed: {e}")))?
+        };
+
         let reader = pair
             .master
             .try_clone_reader()
@@ -116,6 +142,8 @@ impl PtySession {
             output,
             reader_thread: Some(reader_thread),
             torn_down: false,
+            #[cfg(windows)]
+            job,
         })
     }
 
@@ -252,8 +280,24 @@ impl PtySession {
         let mut problems: Vec<String> = Vec::new();
 
         // Kill only if still running; killing an already-exited child is a
-        // no-op we would rather not surface as an error.
-        if matches!(self.child.try_wait(), Ok(None)) {
+        // no-op we would rather not surface as an error. An unreadable status
+        // is reported but still treated as "possibly running", so the kill is
+        // attempted rather than skipped on the optimistic reading.
+        let still_running = match self.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => false,
+            Err(e) => {
+                problems.push(format!("cannot read child status: {e}"));
+                true
+            }
+        };
+        if still_running {
+            // Windows: terminate the whole job first so grandchildren cannot
+            // outlive the direct child and keep the console host attached.
+            #[cfg(windows)]
+            if let Err(e) = self.job.terminate() {
+                problems.push(format!("failed to terminate job: {e}"));
+            }
             if let Err(e) = self.child.kill() {
                 problems.push(format!("failed to kill child: {e}"));
             }
@@ -282,19 +326,22 @@ impl PtySession {
         let writer = self.writer.take();
         let master = self.master.take();
         let reader = self.reader_thread.take();
-        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel::<Result<(), String>>();
         std::thread::spawn(move || {
             drop(writer);
             drop(master);
-            if let Some(t) = reader {
-                let _ = t.join();
-            }
-            let _ = done_tx.send(());
+            let outcome = match reader {
+                Some(t) => t.join().map_err(|_| "reader thread panicked".to_string()),
+                None => Ok(()),
+            };
+            let _ = done_tx.send(outcome);
         });
-        if done_rx.recv_timeout(SHUTDOWN_GRACE).is_err() {
-            problems.push(format!(
+        match done_rx.recv_timeout(SHUTDOWN_GRACE) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => problems.push(e),
+            Err(_) => problems.push(format!(
                 "pty teardown still blocked after {SHUTDOWN_GRACE:?}; abandoning it"
-            ));
+            )),
         }
 
         if problems.is_empty() {
