@@ -135,18 +135,19 @@ jobs:
             runner: ubuntu-latest
             os_name: Linux
             arch_name: ARM64
+          # Intel macOS: use the current explicit Intel image instead of the
+          # retired/unreliably scheduled macos-13 image that previously blocked
+          # releases. RUNNER_OS = macOS and RUNNER_ARCH = X64.
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            os_name: macOS
+            arch_name: X64
           # Apple Silicon: RUNNER_OS = macOS, RUNNER_ARCH = ARM64, even though
           # the Rust triple is aarch64-apple-darwin. The archive must be named
           # with runner labels to match action.yml.
           #
-          # No macOS Intel (x86_64-apple-darwin) target: GitHub's macos-13 Intel
-          # runners are unreliably scheduled (queued indefinitely), which blocked
-          # the whole release. Intel Macs fall back to `cargo install` in the
-          # composite action instead. Re-add a `- target: x86_64-apple-darwin`
-          # entry (and the RUNNER_PAIRS row in the contract test) if a dependable
-          # Intel runner returns.
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
             os_name: macOS
             arch_name: ARM64
           # Windows x64: the archive is still `.tar.gz` for one action-side
@@ -259,9 +260,12 @@ jobs:
             runner: ubuntu-latest
             os_name: Linux
             arch_name: ARM64
-          # No macOS Intel target — see the upload-assets matrix for why.
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            os_name: macOS
+            arch_name: X64
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
             os_name: macOS
             arch_name: ARM64
           - target: x86_64-pc-windows-msvc
@@ -309,9 +313,12 @@ jobs:
             runner: ubuntu-latest
             os_name: Linux
             arch_name: ARM64
-          # No macOS Intel target — see the upload-assets matrix for why.
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            os_name: macOS
+            arch_name: X64
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
             os_name: macOS
             arch_name: ARM64
           - target: x86_64-pc-windows-msvc

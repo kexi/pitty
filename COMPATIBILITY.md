@@ -60,9 +60,9 @@ parse the JSON, not the tables.
 
 Cutting a release is **automated** by
 [`.github/workflows/release.yml`](.github/workflows/release.yml): pushing a
-`v1.x.y` tag builds the four prebuilt binaries (Linux X64/ARM64, macOS ARM64,
-Windows X64), uploads them with checksums, force-moves the floating `v1` major
-tag and `v1.x` minor tag to the release commit, and publishes parallel
+`v1.x.y` tag builds the five prebuilt binaries (Linux X64/ARM64, macOS
+X64/ARM64, Windows X64), uploads them with checksums, force-moves the floating
+`v1` major tag and `v1.x` minor tag to the release commit, and publishes parallel
 floating-ref asset sets. The composite action's `version` input therefore
 defaults to the action ref used in `uses: kexi/pitty@...`, so callers can pin
 `@v1`, a floating minor ref such as `@v1.x` once it exists, or an exact patch
@@ -89,9 +89,9 @@ When cutting a release:
       the release, force-moves the `v1` and matching `v1.x` tags to the release
       commit, and publishes the matching `pitty-v1-...` and `pitty-v1.x-...`
       asset sets to their floating releases.
-- [ ] Verify the run is green and the twelve archives (four per ref: Linux
-      X64/ARM64, macOS ARM64, Windows X64; refs are `<tag>`, `v1`, and `v1.x`)
-      plus their checksums are attached.
+- [ ] Verify the run is green and the fifteen archives (five per ref: Linux
+      X64/ARM64, macOS X64/ARM64, Windows X64; refs are `<tag>`, `v1`, and
+      `v1.x`) plus their checksums are attached.
       The asset names are
       machine-checked against `action.yml` by
       `tests/release_asset_name_contract.rs`, but a real run also confirms the

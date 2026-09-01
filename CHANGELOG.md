@@ -11,6 +11,21 @@ releases; only 1.0.0 carries a release date.
 
 ## [Unreleased]
 
+### Added
+
+- **Production support and security policies.** `SUPPORT.md` now defines the
+  supported workloads, platforms, and operational boundaries, while
+  `SECURITY.md` documents security-update coverage and private vulnerability
+  reporting.
+- **Native macOS Intel release assets.** Release automation now publishes
+  checksum-protected X64 binaries alongside the existing Apple Silicon assets.
+
+### Changed
+
+- **Production-readiness status.** The README now identifies the supported
+  CLI-testing scope as production ready and links that claim to explicit
+  compatibility, support, and security policies.
+
 ## [1.2.2] - 2026-08-02
 
 ### Added

@@ -35,16 +35,14 @@ const RELEASE_YML: &str = include_str!("../.github/workflows/release.yml");
 ///
 /// Apple Silicon is `("macOS", "ARM64")` here, deliberately distinct from the
 /// `aarch64-apple-darwin` Rust triple, because the action keys on GitHub's
-/// runner labels. Windows is `("Windows", "X64")`, not a Git-Bash `uname`
-/// string, because `uname -s` includes the host kernel version on Windows.
-///
-/// No `("macOS", "X64")`: GitHub's macos-13 Intel runners were unreliably
-/// scheduled and blocked releases, so Intel Macs fall back to `cargo install` in
-/// the composite action. Add the pair back here and in release.yml's matrix if a
-/// dependable Intel runner returns.
+/// runner labels. Intel macOS uses the same `macOS`/`X64` labels exposed to the
+/// action even though its Rust target is `x86_64-apple-darwin`. Windows is
+/// `("Windows", "X64")`, not a Git-Bash `uname` string, because `uname -s`
+/// includes the host kernel version on Windows.
 const RUNNER_PAIRS: &[(&str, &str)] = &[
     ("Linux", "X64"),
     ("Linux", "ARM64"),
+    ("macOS", "X64"),
     ("macOS", "ARM64"),
     ("Windows", "X64"),
 ];

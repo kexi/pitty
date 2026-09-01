@@ -94,8 +94,8 @@ Two scanners guard the repository:
 
 Cutting a release is automated by
 [`.github/workflows/release.yml`](.github/workflows/release.yml): pushing a
-`v1.x.y` tag creates the GitHub Release, builds the four prebuilt binaries
-(Linux X64/ARM64, macOS ARM64, Windows X64), uploads them with checksums,
+`v1.x.y` tag creates the GitHub Release, builds the five prebuilt binaries
+(Linux X64/ARM64, macOS X64/ARM64, Windows X64), uploads them with checksums,
 force-moves the floating `v1` tag to the release commit, and publishes a
 parallel `v1`-named asset set. The full step-by-step checklist (including the
 post-push verification and the one-time GitHub Marketplace publish) lives in
