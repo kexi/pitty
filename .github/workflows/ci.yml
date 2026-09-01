@@ -201,16 +201,17 @@ jobs:
   test-windows:
     name: test (Windows)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
       # Non-ignored tests compile the Windows ConPTY backend and exercise the
-      # PTY-free contracts without assuming bash/Nix exists on Windows. Split
-      # them so a Windows-only hang names the specific target; serialize test
-      # threads because several tests intentionally mutate process env vars.
+      # PTY-free contracts first. Split them so a Windows-only hang names the
+      # specific target; serialize test threads because several tests
+      # intentionally mutate process env vars. The real-ConPTY suite and the
+      # dogfood tiers follow below, so Windows is the same gate as Linux/macOS.
       - name: cargo test (lib + bin)
         timeout-minutes: 20
         run: cargo test --lib --bins -- --test-threads=1
@@ -231,14 +232,73 @@ jobs:
         run: cargo test --test e2e -- --test-threads=1
       - name: cargo build
         run: cargo build
-      # A minimal real-PTY smoke test covers the Windows-specific runtime path:
+      # A minimal real-PTY smoke test covers the Windows-native runtime path:
       # portable-pty must spawn cmd.exe through ConPTY, accept CR-terminated
-      # input, observe output, and collect the exit status.
+      # input, observe output, and collect the exit status. It runs before the
+      # bash-based suites so a ConPTY-level regression is named on its own.
       - name: dogfood Windows cmd smoke
         shell: pwsh
         run: |
           $env:PITTY_BIN = (Resolve-Path target/debug/pitty.exe).Path
           & $env:PITTY_BIN run e2e/scenarios/windows
+      # The PTY-gated tests and the dogfood scenarios spawn `bash`, `sleep`,
+      # `printf`, and friends as the PTY child. pitty resolves the program via
+      # the PATH lookup CreateProcess performs, so the Git for Windows coreutils
+      # directory must be on PATH for the spawned child, not just for a `bash`
+      # step shell (which GitHub resolves by absolute path). Prepend it only
+      # inside the steps that need it: prepending it job-wide would shadow
+      # MSVC's link.exe with GNU link for any later rebuild.
+      #
+      # Why fail loudly on the tools instead of skipping: a missing bash would
+      # otherwise surface as spawn-failure exit 3 from every scenario, which
+      # reads like a pitty bug rather than an image change.
+      - name: verify Git for Windows coreutils
+        shell: pwsh
+        run: |
+          $usrBin = 'C:\Program Files\Git\usr\bin'
+          foreach ($tool in 'bash.exe', 'sleep.exe', 'printf.exe', 'ls.exe', 'seq.exe') {
+            if (-not (Test-Path (Join-Path $usrBin $tool))) { throw "missing $tool in $usrBin" }
+          }
+      # `--tests` keeps rustdoc out of this step: the ignored suite lives in the
+      # already-built lib and integration test binaries, and doctests would be
+      # the only target that still needs a link under the GNU-shadowed PATH.
+      - name: cargo test -- --ignored (ConPTY)
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\Program Files\Git\usr\bin;$env:PATH"
+          cargo test --tests -- --ignored --test-threads=1
+      # Dogfood tiers mirror the pty-e2e job. PITTY_BIN / INNER_DIR are resolved
+      # from the parent env by the ${var} expansion fallback in
+      # src/workspace.rs; Resolve-Path yields absolute, space-free runner paths
+      # that survive pitty's whitespace-split spawn.
+      - name: dogfood positive tier
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\Program Files\Git\usr\bin;$env:PATH"
+          $env:PITTY_BIN = (Resolve-Path target/debug/pitty.exe).Path
+          $env:INNER_DIR = (Resolve-Path e2e/scenarios/meta/inner).Path
+          & $env:PITTY_BIN run e2e/scenarios/positive
+      - name: dogfood meta tier (nested ConPTY)
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\Program Files\Git\usr\bin;$env:PATH"
+          $env:PITTY_BIN = (Resolve-Path target/debug/pitty.exe).Path
+          $env:INNER_DIR = (Resolve-Path e2e/scenarios/meta/inner).Path
+          & $env:PITTY_BIN run e2e/scenarios/meta
+      - name: dogfood samples tier (matrix + bench)
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\Program Files\Git\usr\bin;$env:PATH"
+          $env:PITTY_BIN = (Resolve-Path target/debug/pitty.exe).Path
+          # GitHub's pwsh wrapper only propagates the LAST native exit code, so
+          # gate each subcommand explicitly rather than letting an early
+          # failing matrix be masked by a passing bench.
+          & $env:PITTY_BIN matrix e2e/scenarios/samples/matrix-shell.yaml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:PITTY_BIN matrix e2e/scenarios/samples/matrix-multi-axis.yaml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:PITTY_BIN bench e2e/scenarios/samples/bench-shell.yaml --runs 3
 
   pty-e2e:
     name: pty-e2e (ignored tests + dogfood)
@@ -270,8 +330,9 @@ jobs:
       # GitHub Actions ubuntu runners can openpty, so the real-PTY path and the
       # nested-PTY dogfood below both work. If the nested-PTY meta tier ever
       # proves unstable on ubuntu, demote the "dogfood: meta tier" step to a
-      # separate continue-on-error job rather than failing the gate. (macOS is a
-      # required gate too — see the pty-e2e-macos job below.)
+      # separate continue-on-error job rather than failing the gate. (macOS and
+      # Windows are required gates too — see pty-e2e-macos below and the tail
+      # of test-windows above.)
 
       # Residual negative e2e tests kept in tests/e2e.rs as a fallback until the
       # dogfood meta tier is proven stable across runners.
