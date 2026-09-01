@@ -36,7 +36,10 @@ releases; only 1.0.0 carries a release date.
   five minutes. On Windows the child now runs inside a kill-on-close job
   object, so teardown terminates the whole process tree (for example the real
   shell behind Git for Windows' `bin\bash.exe` launcher) rather than only the
-  direct child.
+  direct child. A teardown that leaves the child or its tree alive is now a
+  process error (exit 3) even when every assertion passed; only a console
+  host that is slow to release its handles after the tree died is downgraded
+  to a stderr warning.
 - **Dogfood scenarios assert real output.** Every dogfood needle is now
   computed by the shell (for example `$((40+2))`), so the PTY's echo of the
   typed command can no longer satisfy an assertion on its own.
