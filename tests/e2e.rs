@@ -78,26 +78,34 @@ fn pty_lock() -> MutexGuard<'static, ()> {
     PTY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Teardown must stay bounded even when the child is racing its own exit:
-/// `send: exit` immediately followed by `shutdown` is the sequence that stalled
-/// for ~5 minutes on Windows ConPTY (Git for Windows bash). The bound is two
-/// grace periods (kill wait + handle teardown), so anything under 12s proves
-/// the cap holds; the healthy path finishes in well under a second.
-#[test]
-#[ignore = "requires a usable PTY"]
-fn shutdown_is_bounded_while_child_is_exiting() {
-    let _pty = pty_lock();
-    let dir = tempfile::tempdir().unwrap();
-    let mut session =
-        PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
-    session.send_line("exit").expect("send must succeed");
+/// The bound `shutdown` promises: two grace periods (kill wait + handle
+/// teardown) of 5s each, so anything under 12s proves the cap holds. The
+/// healthy path finishes in well under a second.
+const SHUTDOWN_BOUND: Duration = Duration::from_secs(12);
 
+/// Block until the shell is actually up: a computed needle (see
+/// e2e/scenarios/positive/echo-flow.yaml) that only a running shell can print,
+/// so what follows hits a live shell rather than one still starting.
+fn wait_until_shell_is_up(session: &mut PtySession) {
+    session
+        .send_line("echo up-$((40+2))")
+        .expect("send must succeed");
+    let seen = session.wait_for(&Matcher::contains("up-42"), Duration::from_secs(10));
+    assert!(
+        matches!(seen, ExpectOutcome::Matched { .. }),
+        "shell must come up before teardown: {seen:?}"
+    );
+}
+
+/// Tear the session down and assert the healthy contract: bounded, the child
+/// gone, and no stall reported.
+fn assert_clean_bounded_shutdown(session: &mut PtySession) {
     let started = Instant::now();
     let outcome = session.shutdown();
     let elapsed = started.elapsed();
 
     assert!(
-        elapsed < Duration::from_secs(12),
+        elapsed < SHUTDOWN_BOUND,
         "shutdown must be bounded by its grace periods, took {elapsed:?}"
     );
     assert!(
@@ -111,6 +119,22 @@ fn shutdown_is_bounded_while_child_is_exiting() {
     );
 }
 
+/// Teardown must stay bounded even when the child is racing its own exit:
+/// `send: exit` immediately followed by `shutdown` is the sequence that stalled
+/// for ~5 minutes on Windows ConPTY (Git for Windows bash). Deliberately no
+/// readiness wait: the race is the point.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn shutdown_is_bounded_while_child_is_exiting() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session =
+        PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
+    session.send_line("exit").expect("send must succeed");
+
+    assert_clean_bounded_shutdown(&mut session);
+}
+
 /// The common teardown: an idle interactive shell that never asked to exit is
 /// killed, its tree reaped, and the console handles released — promptly and
 /// without reporting a stall.
@@ -121,34 +145,67 @@ fn shutdown_kills_an_idle_shell_promptly() {
     let dir = tempfile::tempdir().unwrap();
     let mut session =
         PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
-    // Wait for the shell to actually be up (a computed needle that only a
-    // running shell can print), so the kill hits a live, idle shell.
+    wait_until_shell_is_up(&mut session);
+
+    assert_clean_bounded_shutdown(&mut session);
+}
+
+/// Unix: a background job left behind by a shell that has already exited
+/// shares the shell's process group when job control is off (as under
+/// `sh -c`), so teardown must sweep that group even though the direct child
+/// is gone. Otherwise the job keeps the PTY open, the release times out, and
+/// a run whose every assertion passed becomes a process error.
+///
+/// The job ignores SIGHUP because that is the only way it survives the shell:
+/// the kernel HUPs the terminal's foreground group when the session leader
+/// exits, so the case this guards against is a `nohup`ed job or a server
+/// that treats HUP as "reload", not a plain `sleep`.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn shutdown_sweeps_the_process_group_of_an_exited_child() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session =
+        PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
+    // `set +m` turns job control off so the sleeper stays in bash's own
+    // group; `trap '' HUP` is inherited across exec; `exit` then leaves the
+    // sleeper behind, still holding the PTY.
     session
-        .send_line("echo up-$((40+2))")
+        .send_line("set +m; trap '' HUP; sleep 30 & echo $! > sleeper")
         .expect("send must succeed");
-    let seen = session.wait_for(&Matcher::contains("up-42"), Duration::from_secs(10));
+    wait_until_shell_is_up(&mut session);
+    session.send_line("exit").expect("send must succeed");
+    let exited = session
+        .wait_exit_code_until(Instant::now() + Duration::from_secs(10))
+        .expect("child status must be readable");
     assert!(
-        matches!(seen, ExpectOutcome::Matched { .. }),
-        "shell must come up before teardown: {seen:?}"
+        exited.is_some(),
+        "bash must exit on its own before teardown"
     );
+    let sleeper: i32 = std::fs::read_to_string(dir.path().join("sleeper"))
+        .expect("bash must record the sleeper pid")
+        .trim()
+        .parse()
+        .expect("pid file must hold a pid");
 
-    let started = Instant::now();
-    let outcome = session.shutdown();
-    let elapsed = started.elapsed();
+    assert_clean_bounded_shutdown(&mut session);
 
-    assert!(
-        elapsed < Duration::from_secs(12),
-        "shutdown must be bounded by its grace periods, took {elapsed:?}"
-    );
-    assert!(
-        !session.is_running().expect("child status must be readable"),
-        "the child must be gone after shutdown"
-    );
-    assert_eq!(
-        outcome.expect("teardown must not fail"),
-        Teardown::Clean,
-        "teardown must complete cleanly"
-    );
+    // The sleeper was reparented when bash exited, so once killed it is
+    // reaped by init; allow a moment for that before calling it survived.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        // SAFETY: signal 0 only probes whether the pid exists.
+        let alive = unsafe { libc::kill(sleeper, 0) } == 0;
+        if !alive {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "sleeper {sleeper} survived teardown (process group not swept)"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Windows: teardown must take the whole process tree with it, not just the
@@ -173,14 +230,7 @@ fn shutdown_kills_grandchildren_on_windows() {
     session
         .send_line("(while :; do printf x >> heartbeat; sleep 0.2; done) &")
         .expect("send must succeed");
-    session
-        .send_line("echo up-$((40+2))")
-        .expect("send must succeed");
-    let seen = session.wait_for(&Matcher::contains("up-42"), Duration::from_secs(10));
-    assert!(
-        matches!(seen, ExpectOutcome::Matched { .. }),
-        "shell must come up before teardown: {seen:?}"
-    );
+    wait_until_shell_is_up(&mut session);
     // Prove the grandchild is actually running before the kill: the file must
     // grow at least twice, not merely exist (a redirection creates it even if
     // nothing is ever written).
@@ -198,12 +248,7 @@ fn shutdown_kills_grandchildren_on_windows() {
         }
     }
 
-    let outcome = session.shutdown();
-    assert_eq!(
-        outcome.expect("teardown must not fail"),
-        Teardown::Clean,
-        "teardown must complete cleanly"
-    );
+    assert_clean_bounded_shutdown(&mut session);
 
     // Settle past any write that was in flight when the tree died, then the
     // size must hold still for a full second.

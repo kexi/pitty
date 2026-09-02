@@ -44,6 +44,17 @@ impl PittyError {
             PittyError::Process(_) => 3,
         }
     }
+
+    /// The message without the class prefix that `Display` adds.
+    ///
+    /// For callers that fold one error into another of the same class: using
+    /// `Display` there would nest the prefix ("process error: process error:
+    /// ...").
+    pub fn message(&self) -> &str {
+        match self {
+            PittyError::AssertionFailed(m) | PittyError::Scenario(m) | PittyError::Process(m) => m,
+        }
+    }
 }
 
 /// Numeric severity used when reducing many scenario outcomes to a single
@@ -80,6 +91,19 @@ mod tests {
         assert_eq!(PittyError::AssertionFailed("x".into()).exit_code(), 1);
         assert_eq!(PittyError::Scenario("x".into()).exit_code(), 2);
         assert_eq!(PittyError::Process("x".into()).exit_code(), 3);
+    }
+
+    #[test]
+    fn message_strips_the_class_prefix() {
+        // Folding a teardown error into a run error must not nest prefixes.
+        let err = PittyError::Process("child still running".into());
+        assert_eq!(err.message(), "child still running");
+        assert_eq!(err.to_string(), "process error: child still running");
+        assert_eq!(
+            PittyError::Scenario("bad yaml".into()).message(),
+            "bad yaml"
+        );
+        assert_eq!(PittyError::AssertionFailed("nope".into()).message(), "nope");
     }
 
     #[test]

@@ -15,7 +15,8 @@ all driven by declarative YAML scenarios.
 > [`COMPATIBILITY.md`](COMPATIBILITY.md), every release is gated on Linux,
 > macOS, and Windows, and prebuilt archives are checksum-verified before use.
 > Pin an exact patch release for reproducible production CI. See
-> [`SUPPORT.md`](SUPPORT.md) for the supported platforms and operational scope,
+> [`SUPPORT.md`](SUPPORT.md) for the supported platforms (including which
+> architectures the test suites run on) and operational scope,
 > and [`SECURITY.md`](SECURITY.md) for vulnerability reporting and security
 > update coverage.
 
@@ -169,6 +170,12 @@ control byte (e.g. `ctrl+c` → `0x03`).
   default 30s). A successful match advances an internal cursor, so two
   consecutive `expect: hello` steps require two distinct occurrences
   (Playwright-style sequential semantics).
+- The PTY **echoes what you `send`**, and that echo is part of the output
+  `expect` searches. `send: echo ready` followed by `expect: ready` therefore
+  matches the typed line before the shell has run anything. Make the needle
+  something only execution can produce — for example `send: echo
+  ready-$((40+2))` with `expect: ready-42`, the idiom the bundled
+  `e2e/scenarios` use — or assert on a file with `expect_file_contains`.
 - `expect_not` is **immediate**: it never waits. It fails if the pattern is
   currently present in the *unconsumed* output, and succeeds otherwise. The
   unconsumed region is everything after the last **successful** `expect`'s
