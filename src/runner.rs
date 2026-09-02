@@ -95,9 +95,29 @@ pub fn run_scenario(
 
     let mut run_error: Option<PittyError> = None;
     for step in &scenario.steps {
-        // Capture file baselines at spawn time so `expect_file_changed`
-        // measures change from the moment the process starts.
         if matches!(step, Step::Spawn(_)) {
+            // A second `spawn` retires the previous session through the same
+            // classified teardown as the end of the run. Letting the later
+            // assignment drop it would route it through `Drop`, which has to
+            // swallow a live-tree error — the very thing the verdict is
+            // supposed to reflect. Why in place rather than `take()`n out: on
+            // a teardown or spawn failure the retired session must stay in
+            // `state.session` so the hard-fault path below still writes its
+            // output and the partial assertion rows to the log (a second
+            // `shutdown` on it is a no-op).
+            if let Some(previous) = state.session.as_mut() {
+                if let Err(e) = classify_teardown(previous.shutdown()) {
+                    run_error = Some(e);
+                    break;
+                }
+            }
+            // Capture file baselines at spawn time so `expect_file_changed`
+            // measures change from the moment *this* process starts. The store
+            // is rebuilt rather than topped up: a baseline kept from an earlier
+            // spawn would let that child's writes satisfy an assertion about
+            // this one. Priming happens after the previous session is torn
+            // down so its last writes are already in the baseline.
+            state.snapshots = FileSnapshots::new();
             prime_snapshots(scenario, &workspace, &mut state.snapshots);
         }
         match execute_step(step, &workspace, &mut state, options) {
@@ -211,17 +231,10 @@ fn execute_step(
             for (k, v) in &spec.env {
                 env.push((k.clone(), workspace.expand(v)));
             }
-            // A second `spawn` retires the previous session through the same
-            // classified teardown as the end of the run. Letting the
-            // assignment below drop it would route it through `Drop`, which
-            // has to swallow a live-tree error — the very thing the verdict
-            // is supposed to reflect.
-            if let Some(mut previous) = state.session.take() {
-                classify_teardown(previous.shutdown())?;
-            }
+            // The previous session (if any) was already retired and the file
+            // baselines re-primed by `run_scenario` before this step ran.
             let command = workspace.expand(&spec.command);
-            let session = PtySession::spawn(&command, &cwd, &env)?;
-            state.session = Some(session);
+            state.session = Some(PtySession::spawn(&command, &cwd, &env)?);
             Ok(())
         }
         Step::Send(text) => {

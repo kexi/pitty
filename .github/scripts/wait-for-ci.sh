@@ -19,7 +19,7 @@
 #   CI_WORKFLOW_NAME           workflow name to look for (default: CI)
 #   CI_GATE_POLL_SECONDS       sleep between polls (default: 30)
 #   CI_GATE_DISCOVERY_SECONDS  grace before "no run" is final (default: 600)
-#   CI_GATE_MAX_MISSED_POLLS   consecutive failed polls tolerated (default: 10)
+#   CI_GATE_MAX_MISSED_POLLS   consecutive failed polls before giving up (default: 10)
 #   CI_GATE_GH_BIN             gh executable (default: gh; tests inject a fake)
 set -euo pipefail
 

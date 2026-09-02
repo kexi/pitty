@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use pitty::bench::run_bench;
 use pitty::config::Scenario;
 use pitty::matrix::run_matrix;
-use pitty::pty::{ExpectOutcome, Matcher, PtySession, Teardown};
+use pitty::pty::{ExpectOutcome, Matcher, PtySession, Teardown, SHUTDOWN_GRACE};
 use pitty::report::Status;
 use pitty::run_scenario;
 use pitty::runner::RunOptions;
@@ -79,9 +79,10 @@ fn pty_lock() -> MutexGuard<'static, ()> {
 }
 
 /// The bound `shutdown` promises: two grace periods (kill wait + handle
-/// teardown) of 5s each, so anything under 12s proves the cap holds. The
-/// healthy path finishes in well under a second.
-const SHUTDOWN_BOUND: Duration = Duration::from_secs(12);
+/// teardown) plus slack, derived from the crate's constant so a retuned grace
+/// period cannot silently loosen or tighten this check. The healthy path
+/// finishes in well under a second.
+const SHUTDOWN_BOUND: Duration = Duration::from_secs(2 * SHUTDOWN_GRACE.as_secs() + 2);
 
 /// Block until the shell is actually up: a computed needle (see
 /// e2e/scenarios/positive/echo-flow.yaml) that only a running shell can print,
@@ -188,6 +189,14 @@ fn shutdown_sweeps_the_process_group_of_an_exited_child() {
         .trim()
         .parse()
         .expect("pid file must hold a pid");
+    // Without this the post-teardown poll cannot tell "swept" from "never
+    // started" (a `sleep` missing from PATH also yields a pid that is gone).
+    // SAFETY: signal 0 only probes whether the pid exists.
+    assert_eq!(
+        unsafe { libc::kill(sleeper, 0) },
+        0,
+        "sleeper {sleeper} must still be alive after bash exits, or the test proves nothing"
+    );
 
     assert_clean_bounded_shutdown(&mut session);
 
@@ -262,6 +271,53 @@ fn shutdown_kills_grandchildren_on_windows() {
     );
 }
 
+/// `expect_file_changed` measures change since the *current* child was
+/// spawned. A second `spawn` must re-baseline: a write made by the first child
+/// is part of the world the second child starts in, not a change it made, so
+/// asserting a change right after the second spawn must fail, and only a write
+/// by the second child may satisfy it.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn respawn_rebaselines_expect_file_changed() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+name: respawn-baseline
+steps:
+  - spawn: bash
+  - send: echo first > marker.txt; echo wrote-$((40+2))
+  - expect:
+      contains: wrote-42
+      timeout: 10s
+  - spawn: bash
+  - expect_file_changed:
+      path: marker.txt
+  - send: echo second >> marker.txt; echo wrote-$((40+3))
+  - expect:
+      contains: wrote-43
+      timeout: 10s
+  - expect_file_changed:
+      path: marker.txt
+"#;
+    let scenario = Scenario::from_yaml(yaml).unwrap();
+    let report = run_scenario(&scenario, dir.path(), &RunOptions::default()).unwrap();
+
+    let changed: Vec<bool> = report
+        .assertions
+        .iter()
+        .filter(|a| a.step.starts_with("expect_file_changed"))
+        .map(|a| a.passed)
+        .collect();
+    assert_eq!(
+        changed,
+        vec![false, true],
+        "the first child's write must not count for the second child, but the \
+         second child's own write must: {:?}",
+        report.assertions
+    );
+    assert_eq!(report.status, Status::Failed);
+}
+
 /// An `expect` for output that never appears must time out and fail (not hang),
 /// proving the deadline path works end to end.
 ///
@@ -308,6 +364,37 @@ steps:
     let scenario = Scenario::from_yaml(yaml).unwrap();
     let err = run_scenario(&scenario, Path::new("."), &RunOptions::default()).unwrap_err();
     assert_eq!(err.exit_code(), 3);
+}
+
+/// A second `spawn` that fails must not cost the run its log: the first
+/// session's output and the assertion rows recorded so far are what explain
+/// the hard fault, and the hard-fault path promises they land on disk.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn failed_respawn_still_writes_the_log() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+name: respawn-log
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  - send: echo first-$((40+2))
+  - expect:
+      contains: first-42
+      timeout: 10s
+  - spawn: "   "
+"#;
+    let scenario = Scenario::from_yaml(yaml).unwrap();
+    let err = run_scenario(&scenario, dir.path(), &RunOptions::default()).unwrap_err();
+    assert_eq!(err.exit_code(), 3);
+    let log = std::fs::read_to_string(dir.path().join("logs/respawn-log.log"))
+        .expect("the log must be written even though the second spawn failed");
+    assert!(
+        log.contains("first-42"),
+        "log must carry the first session's output:\n{log}"
+    );
 }
 
 /// The deadline form of `expect_exit` must wait for a child that exits *after*
