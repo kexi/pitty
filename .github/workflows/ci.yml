@@ -230,9 +230,9 @@ jobs:
       - name: cargo test (file-only e2e)
         timeout-minutes: 5
         run: cargo test --test e2e -- --test-threads=1
-      - name: cargo build
-        run: cargo build
-      # Link every test binary now, while MSVC's link.exe is still the one on
+      # Link every test binary — and the `pitty` bin the dogfood tiers run,
+      # which cargo builds for the integration tests' CARGO_BIN_EXE — now,
+      # while MSVC's link.exe is still the one on
       # PATH: the next step puts Git for Windows' usr\bin first (it ships a GNU
       # link.exe), and `--no-run` guarantees the later `--ignored` run finds
       # everything already built — including a test file added after the

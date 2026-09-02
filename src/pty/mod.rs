@@ -78,7 +78,7 @@ pub struct PtySession {
 /// as the backstop for whatever the console host does next. Healthy teardown
 /// on every platform is on the order of milliseconds (macOS is the slowest at
 /// ~100ms), so 5s is generous on the good path and caps the bad one.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 impl PtySession {
     /// Open a PTY and spawn `command` (a shell-style command line) within it.
@@ -278,10 +278,13 @@ impl PtySession {
     /// thread later, which is exactly the unbounded block this method exists
     /// to avoid.
     pub fn shutdown(&mut self) -> Result<Teardown, PittyError> {
-        let already_torn_down = self.master.is_none();
-        if already_torn_down {
+        // Taking the master first is the re-entry guard: `Drop` calls
+        // `shutdown` again — including during a panic unwind out of this
+        // method — and must find nothing left to tear down rather than repeat
+        // the kills and pay the grace periods a second time.
+        let Some(master) = self.master.take() else {
             return Ok(Teardown::Clean);
-        }
+        };
         // Fatal: the environment may be polluted (a live child or tree, an
         // unreadable status, a broken reader). Stall: only the console-handle
         // release ran out of time after the tree was already dead.
@@ -308,30 +311,6 @@ impl PtySession {
         #[cfg(not(windows))]
         let tree_killed = false;
 
-        // Unix: the child is a session leader (portable-pty calls setsid), so
-        // its pid names its process group. Killing that group takes along
-        // whatever still shares it — a `sh -c` pipeline, a plain `exec`'d
-        // server, a background job of a shell without job control — which a
-        // kill of the leader alone would orphan. It runs whether or not the
-        // leader is still alive: the leader exiting is exactly how such a job
-        // gets left behind (a group outlives its leader, and the kernel's own
-        // SIGHUP to the foreground group on leader exit does nothing for a
-        // `nohup`ed job or a server that reloads on HUP), and it runs before
-        // the status poll so an unreaped leader is at worst a zombie still
-        // pinning the group id. It is best-effort, not a session kill:
-        // an interactive shell's job control puts each pipeline in its own
-        // group, so those are not covered, and this never counts as a proven
-        // tree kill (see `tree_killed`).
-        #[cfg(unix)]
-        if let Some(pid) = self.child.process_id() {
-            // SAFETY: plain syscall. A group that is already empty yields
-            // ESRCH, which is ignored because the direct kill below still
-            // runs for a live leader.
-            unsafe {
-                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-            }
-        }
-
         // Kill only if still running; killing an already-exited child is a
         // no-op we would rather not surface as an error. An unreadable status
         // is reported but still treated as "possibly running", so the kill is
@@ -344,6 +323,47 @@ impl PtySession {
                 true
             }
         };
+
+        // Unix: the child is a session leader (portable-pty calls setsid), so
+        // its pid names its process group. Killing that group takes along
+        // whatever still shares it — a `sh -c` pipeline, a plain `exec`'d
+        // server, a background job of a shell without job control — which a
+        // kill of the leader alone would orphan, and it runs even after the
+        // leader has exited: that is exactly how such a job gets left behind
+        // (a group outlives its leader, and the kernel's own SIGHUP to the
+        // foreground group on leader exit does nothing for a job that ignores
+        // HUP). Why not sweep unconditionally: once the leader is reaped and
+        // its group empty, the pid is free for reuse and `kill(-pid)` could
+        // hit an unrelated group that recycled it. The tell is whether a
+        // process still answers to the leader's pid: while our group has any
+        // member the kernel pins the number but no process carries it (the
+        // leader is gone), so a process found under it after the reap can
+        // only be a stranger that recycled it. Why not the reader seeing EOF
+        // as the "everything gone" signal instead: XNU revokes the controlling
+        // terminal when the session leader exits, so on macOS the reader hits
+        // EOF while a same-group job is still alive. It is best-effort, not a
+        // session kill: an interactive shell's job control puts each pipeline
+        // in its own group, so those are not covered, and this never counts
+        // as a proven tree kill (see `tree_killed`).
+        #[cfg(unix)]
+        if let Some(pid) = self.child.process_id() {
+            let pid = pid as libc::pid_t;
+            // SAFETY: plain syscalls; signal 0 only probes for existence, and
+            // an empty group yields ESRCH, which is ignored because the direct
+            // kill below still runs for a live leader.
+            let leader_pid_recycled = !still_running
+                && unsafe {
+                    let probe = libc::kill(pid, 0);
+                    probe == 0
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+                };
+            if !leader_pid_recycled {
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                }
+            }
+        }
+
         if still_running {
             // The direct kill is the Unix path and the Windows fallback for a
             // job that could not be terminated; a successful job termination
@@ -366,7 +386,6 @@ impl PtySession {
         // caller's thread lets us wait with a deadline and abandon the teardown
         // (leaking one thread and its handles) instead of hanging the scenario.
         let writer = self.writer.take();
-        let master = self.master.take();
         let reader = self.reader_thread.take();
         let (done_tx, done_rx) = mpsc::channel::<Result<(), String>>();
         std::thread::spawn(move || {
