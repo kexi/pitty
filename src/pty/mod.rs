@@ -218,7 +218,7 @@ impl PtySession {
 
     /// Poll whether the child has exited; returns its exit code if so.
     pub fn try_exit_code(&mut self) -> Result<Option<i32>, PittyError> {
-        try_child_exit(&mut *self.child)
+        observe_exit(&mut *self.child)
     }
 
     /// Poll for the child's exit until it exits or `deadline` elapses.
@@ -241,7 +241,7 @@ impl PtySession {
         &mut self,
         deadline: std::time::Instant,
     ) -> Result<Option<i32>, PittyError> {
-        wait_child_until(&mut *self.child, deadline)
+        poll_exit_until(&mut *self.child, deadline, observe_exit)
     }
 
     /// Block until the child exits and return its exit code.
@@ -250,11 +250,17 @@ impl PtySession {
     /// via [`Self::try_exit_code`] (a scenario waits for exit explicitly with a
     /// `wait`/`expect` step). This blocking variant is retained as part of the
     /// public library surface for embedders driving a `PtySession` directly.
+    ///
+    /// Why a poll rather than `child.wait()`: on Unix `wait` reaps, and the
+    /// session relies on the child staying reapable-but-unreaped until
+    /// `shutdown` (see [`observe_exit`]).
     pub fn wait_exit_code(&mut self) -> Result<i32, PittyError> {
-        self.child
-            .wait()
-            .map(|status| status.exit_code() as i32)
-            .map_err(|e| PittyError::Process(format!("wait failed: {e}")))
+        loop {
+            if let Some(code) = observe_exit(&mut *self.child)? {
+                return Ok(code);
+            }
+            std::thread::sleep(EXIT_POLL_INTERVAL);
+        }
     }
 
     /// Whether the child is still running.
@@ -311,19 +317,6 @@ impl PtySession {
         #[cfg(not(windows))]
         let tree_killed = false;
 
-        // Kill only if still running; killing an already-exited child is a
-        // no-op we would rather not surface as an error. An unreadable status
-        // is reported but still treated as "possibly running", so the kill is
-        // attempted rather than skipped on the optimistic reading.
-        let still_running = match self.child.try_wait() {
-            Ok(None) => true,
-            Ok(Some(_)) => false,
-            Err(e) => {
-                fatal.push(format!("cannot read child status: {e}"));
-                true
-            }
-        };
-
         // Unix: the child is a session leader (portable-pty calls setsid), so
         // its pid names its process group. Killing that group takes along
         // whatever still shares it — a `sh -c` pipeline, a plain `exec`'d
@@ -332,36 +325,49 @@ impl PtySession {
         // leader has exited: that is exactly how such a job gets left behind
         // (a group outlives its leader, and the kernel's own SIGHUP to the
         // foreground group on leader exit does nothing for a job that ignores
-        // HUP). Why not sweep unconditionally: once the leader is reaped and
-        // its group empty, the pid is free for reuse and `kill(-pid)` could
-        // hit an unrelated group that recycled it. The tell is whether a
-        // process still answers to the leader's pid: while our group has any
-        // member the kernel pins the number but no process carries it (the
-        // leader is gone), so a process found under it after the reap can
-        // only be a stranger that recycled it. Why not the reader seeing EOF
-        // as the "everything gone" signal instead: XNU revokes the controlling
-        // terminal when the session leader exits, so on macOS the reader hits
-        // EOF while a same-group job is still alive. It is best-effort, not a
-        // session kill: an interactive shell's job control puts each pipeline
-        // in its own group, so those are not covered, and this never counts
-        // as a proven tree kill (see `tree_killed`).
+        // HUP).
+        //
+        // Why this is safe to do unconditionally: the leader has never been
+        // reaped at this point — every exit observation goes through
+        // `observe_exit`, which peeks with `waitid(WNOWAIT)` — so its pid is
+        // still held by either a live process or its zombie and cannot have
+        // been recycled by a stranger. That is also why the sweep comes
+        // before the status poll and the reap below, not after them. Why not
+        // the reader seeing EOF as the "everything gone" signal instead: XNU
+        // revokes the controlling terminal when the session leader exits, so
+        // on macOS the reader hits EOF while a same-group job is still alive.
+        // It is best-effort, not a session kill: an interactive shell's job
+        // control puts each pipeline in its own group, so those are not
+        // covered, and this never counts as a proven tree kill (see
+        // `tree_killed`).
         #[cfg(unix)]
         if let Some(pid) = self.child.process_id() {
-            let pid = pid as libc::pid_t;
-            // SAFETY: plain syscalls; signal 0 only probes for existence, and
-            // an empty group yields ESRCH, which is ignored because the direct
-            // kill below still runs for a live leader.
-            let leader_pid_recycled = !still_running
-                && unsafe {
-                    let probe = libc::kill(pid, 0);
-                    probe == 0
-                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-                };
-            if !leader_pid_recycled {
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                }
+            // SAFETY: plain syscall. A group that is already empty yields
+            // ESRCH, which is ignored because the direct kill below still
+            // runs for a live leader.
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
             }
+        }
+
+        // Kill only if still running; killing an already-exited child is a
+        // no-op we would rather not surface as an error. An unreadable status
+        // is reported but still treated as "possibly running", so the kill is
+        // attempted rather than skipped on the optimistic reading. This is the
+        // one place the child is actually reaped (`await_reap` / `try_wait`);
+        // the sweep above must already have happened.
+        let still_running = match observe_exit(&mut *self.child) {
+            Ok(None) => true,
+            Ok(Some(_)) => false,
+            Err(e) => {
+                fatal.push(format!("cannot read child status: {}", e.message()));
+                true
+            }
+        };
+        if !still_running {
+            // Release the zombie now that the group sweep no longer needs its
+            // pid pinned. It has exited, so this returns at once.
+            let _ = self.child.try_wait();
         }
 
         if still_running {
@@ -470,7 +476,7 @@ fn reap_orphan(mut child: Box<dyn Child + Send + Sync>, cause: String) -> PittyE
 /// a console read can take a long time to actually die. A bounded poll keeps
 /// a stuck child from stalling the runner.
 fn await_reap(child: &mut (dyn Child + Send + Sync), grace: Duration) -> Option<String> {
-    match wait_child_until(child, Instant::now() + grace) {
+    match poll_exit_until(child, Instant::now() + grace, try_child_exit) {
         Ok(Some(_)) => None,
         Ok(None) => Some(format!("child still running {grace:?} after kill")),
         Err(e) => Some(e.message().to_string()),
@@ -490,25 +496,99 @@ fn try_child_exit(child: &mut (dyn Child + Send + Sync)) -> Result<Option<i32>, 
 ///
 /// Free function rather than a method so `spawn`'s failure path can reap a
 /// child it has not wrapped in a session yet.
-fn wait_child_until(
+/// Poll cadence for exit observation: short enough to observe a fresh exit
+/// promptly, long enough to avoid a busy loop. PTY teardown is on the order of
+/// tens of milliseconds, so 10ms keeps observation tight without spinning.
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// The child's exit status if it has exited, observed *without* reaping it.
+///
+/// Why not `try_wait` (which `try_child_exit` wraps): on Unix that is
+/// `waitpid`, and reaping releases the pid as soon as the process group is
+/// empty. `shutdown` sends `SIGKILL` to the group named by that pid, so a
+/// reaped leader would open a window in which the number belongs to a
+/// stranger. Peeking with `waitid(WNOWAIT)` leaves the zombie in place, which
+/// pins the pid until `shutdown` has swept the group and only then reaps.
+/// Windows process handles never recycle underneath us, so `try_wait` is fine
+/// there. Signal deaths map to exit code 1, matching portable-pty's own
+/// `ExitStatus` conversion so the report is identical either way.
+fn observe_exit(child: &mut (dyn Child + Send + Sync)) -> Result<Option<i32>, PittyError> {
+    #[cfg(unix)]
+    {
+        let pid = child
+            .process_id()
+            .ok_or_else(|| PittyError::Process("child has no pid".to_string()))?;
+        // SAFETY: `info` is zero-initialised and sized for `siginfo_t`; with
+        // WNOHANG and no state change the kernel leaves `si_pid` at 0. WNOWAIT
+        // keeps the child reapable afterwards, which `shutdown` relies on.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if rc == -1 {
+            let e = std::io::Error::last_os_error();
+            // ECHILD: the child has already been reaped (only `shutdown` does
+            // that), so the kernel no longer knows it; the status is cached in
+            // the std `Child` underneath portable-pty, which `try_wait` serves.
+            if e.raw_os_error() == Some(libc::ECHILD) {
+                return try_child_exit(child);
+            }
+            return Err(PittyError::Process(format!("waitid failed: {e}")));
+        }
+        let (reported_pid, code, status) = siginfo_child_fields(&info);
+        if reported_pid == 0 {
+            return Ok(None);
+        }
+        // Anything but a normal exit is a signal death (killed/dumped),
+        // reported as 1 like portable-pty does.
+        Ok(Some(if code == libc::CLD_EXITED { status } else { 1 }))
+    }
+    #[cfg(not(unix))]
+    {
+        try_child_exit(child)
+    }
+}
+
+/// `(si_pid, si_code, si_status)` — the libc crate exposes these as accessor
+/// methods on Linux/Android (the struct is a union there) and as plain fields
+/// on the BSD family including macOS.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn siginfo_child_fields(info: &libc::siginfo_t) -> (libc::pid_t, libc::c_int, libc::c_int) {
+    // SAFETY: the accessors read the `_sigchld` union member, which is the
+    // populated one for a WEXITED report.
+    unsafe { (info.si_pid(), info.si_code, info.si_status()) }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn siginfo_child_fields(info: &libc::siginfo_t) -> (libc::pid_t, libc::c_int, libc::c_int) {
+    (info.si_pid, info.si_code, info.si_status)
+}
+
+/// Poll `probe` until it reports an exit or `deadline` elapses.
+///
+/// `probe` is [`observe_exit`] for observation (non-reaping) and
+/// [`try_child_exit`] for the final reap in teardown.
+fn poll_exit_until(
     child: &mut (dyn Child + Send + Sync),
     deadline: Instant,
+    probe: fn(&mut (dyn Child + Send + Sync)) -> Result<Option<i32>, PittyError>,
 ) -> Result<Option<i32>, PittyError> {
-    // Poll cadence: short enough to observe a fresh exit promptly, long
-    // enough to avoid a busy loop. PTY teardown is on the order of tens of
-    // milliseconds, so 10ms keeps observation tight without spinning.
-    const POLL_INTERVAL: Duration = Duration::from_millis(10);
     loop {
-        if let Some(code) = try_child_exit(child)? {
+        if let Some(code) = probe(child)? {
             return Ok(Some(code));
         }
         if Instant::now() >= deadline {
             return Ok(None);
         }
         // Never overshoot the deadline: cap the sleep at the remaining time
-        // so the loop's worst-case overrun is one `try_wait` call.
+        // so the loop's worst-case overrun is one probe.
         let remaining = deadline.saturating_duration_since(Instant::now());
-        std::thread::sleep(POLL_INTERVAL.min(remaining));
+        std::thread::sleep(EXIT_POLL_INTERVAL.min(remaining));
     }
 }
 

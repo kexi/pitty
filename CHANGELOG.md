@@ -44,8 +44,12 @@ releases; only 1.0.0 carries a release date.
   child's process group (the child is a session leader), a best-effort sweep
   of descendants that still share that group even after the child itself has
   exited; pipelines an interactive shell placed in their own job-control
-  groups are not covered. A `spawn` that replaces a live session tears the
-  previous one down through the same classification instead of silently.
+  groups are not covered. Exit observation (`expect_exit`, `expect_running`)
+  no longer reaps the child on Unix — it peeks with `waitid(WNOWAIT)` — so the
+  leader's pid stays pinned until that sweep has run and cannot be recycled
+  by an unrelated process in between. A `spawn` that replaces a live session
+  tears the previous one down through the same classification instead of
+  silently.
 - **Dogfood scenarios assert real output.** Every dogfood needle is now
   computed by the shell (for example `$((40+2))`), so the PTY's echo of the
   typed command can no longer satisfy an assertion on its own.
