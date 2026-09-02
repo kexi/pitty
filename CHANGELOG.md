@@ -29,7 +29,8 @@ releases; only 1.0.0 carries a release date.
   suite and all three dogfood tiers through ConPTY, matching Linux and macOS,
   instead of a single cmd.exe smoke scenario.
 - **Releases wait for CI.** The release workflow now refuses to publish until
-  a CI run of the tagged commit has succeeded on every platform.
+  a CI run of the tagged commit has succeeded on every platform. A transient
+  GitHub API failure while waiting is retried rather than treated as a red CI.
 - **Bounded PTY teardown.** Session shutdown is capped at five seconds per
   phase and reports a stalled teardown on stderr instead of hanging; on
   Windows ConPTY a stalled teardown previously blocked a scenario for about
@@ -41,8 +42,10 @@ releases; only 1.0.0 carries a release date.
   host that is slow to release its handles after the tree died is downgraded
   to a stderr warning. On Unix, teardown now also sends `SIGKILL` to the
   child's process group (the child is a session leader), a best-effort sweep
-  of descendants that still share that group; pipelines an interactive shell
-  placed in their own job-control groups are not covered.
+  of descendants that still share that group even after the child itself has
+  exited; pipelines an interactive shell placed in their own job-control
+  groups are not covered. A `spawn` that replaces a live session tears the
+  previous one down through the same classification instead of silently.
 - **Dogfood scenarios assert real output.** Every dogfood needle is now
   computed by the shell (for example `$((40+2))`), so the PTY's echo of the
   typed command can no longer satisfy an assertion on its own.

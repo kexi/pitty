@@ -24,12 +24,17 @@ remain downloadable for reproducibility but do not receive backports.
 
 ## Supported platforms
 
-Release CI runs the full PTY test and dogfood suites on Linux, macOS, and
-Windows (through ConPTY). Releases provide prebuilt binaries for:
+Release CI runs the full PTY test and dogfood suites on Linux X64, macOS
+ARM64, and Windows X64 (through ConPTY), and a release is published only after
+that CI run is green. Releases provide prebuilt binaries for:
 
 - Linux X64 and ARM64
 - macOS X64 and ARM64
 - Windows X64
+
+The Linux ARM64 and macOS X64 binaries are compiled and checksummed by the
+same release run but the test suites do not execute on those architectures;
+they share the tested code path of their operating system.
 
 Other architectures may work through a source build but are not release-gated
 and are not part of the production-ready support claim.

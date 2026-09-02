@@ -159,26 +159,16 @@ pub fn run_scenario(
     // slow to release its handles after the tree died changes nothing about
     // the run and is only reported.
     if let Some(mut session) = state.session.take() {
-        match session.shutdown() {
-            Ok(Teardown::Clean) => {}
-            Ok(Teardown::Stalled(msg)) => eprintln!("warning: pty teardown: {msg}"),
-            // A process failure outranks whatever the run already recorded
-            // (the established severity order), so the earlier error is
-            // folded into the message rather than the other way round. The
-            // teardown error's own message is unwrapped first so the combined
-            // error does not read "process error: process error: ...".
-            Err(teardown) => {
-                run_error = Some(match run_error.take() {
-                    Some(earlier) => {
-                        let detail = match teardown {
-                            PittyError::Process(msg) => msg,
-                            other => other.to_string(),
-                        };
-                        PittyError::Process(format!("{detail}; earlier error: {earlier}"))
-                    }
-                    None => teardown,
-                });
-            }
+        // A process failure outranks whatever the run already recorded (the
+        // established severity order), so the earlier error is folded into
+        // the message rather than the other way round.
+        if let Err(teardown) = classify_teardown(session.shutdown()) {
+            run_error = Some(match run_error.take() {
+                Some(earlier) => {
+                    PittyError::Process(format!("{}; earlier error: {earlier}", teardown.message()))
+                }
+                None => teardown,
+            });
         }
     }
 
@@ -220,6 +210,14 @@ fn execute_step(
             let mut env = workspace.env().to_vec();
             for (k, v) in &spec.env {
                 env.push((k.clone(), workspace.expand(v)));
+            }
+            // A second `spawn` retires the previous session through the same
+            // classified teardown as the end of the run. Letting the
+            // assignment below drop it would route it through `Drop`, which
+            // has to swallow a live-tree error — the very thing the verdict
+            // is supposed to reflect.
+            if let Some(mut previous) = state.session.take() {
+                classify_teardown(previous.shutdown())?;
             }
             let command = workspace.expand(&spec.command);
             let session = PtySession::spawn(&command, &cwd, &env)?;
@@ -609,6 +607,21 @@ fn mask_report(report: &mut Report, secrets: &[String]) {
         assertion.step = mask_secrets(&assertion.step, secrets);
         if let Some(message) = &assertion.message {
             assertion.message = Some(mask_secrets(message, secrets));
+        }
+    }
+}
+
+/// Turn a session teardown outcome into the run's view of it: a stall is
+/// reported on stderr and changes nothing, everything else passes through.
+///
+/// Shared by the end-of-run teardown and a `spawn` that replaces a live
+/// session, so both classify a leaked child tree the same way.
+fn classify_teardown(outcome: Result<Teardown, PittyError>) -> Result<(), PittyError> {
+    match outcome? {
+        Teardown::Clean => Ok(()),
+        Teardown::Stalled(msg) => {
+            eprintln!("warning: pty teardown: {msg}");
+            Ok(())
         }
     }
 }

@@ -348,13 +348,16 @@ fn run_wait_script(responses: &[&str], discovery_seconds: u32) -> i32 {
     }
     // The fake prints response-N on its N-th call and keeps returning the last
     // one afterwards, so a scripted sequence like [in_progress, success] models
-    // a run that finishes while the gate is polling. It is POSIX sh under an
-    // absolute shebang because the Nix build sandbox (which runs these tests
-    // in checkPhase) provides /bin/sh but no /usr/bin/env.
+    // a run that finishes while the gate is polling. A response of `GH_FAIL`
+    // makes that call exit non-zero with nothing on stdout, the shape of an
+    // API outage. It is POSIX sh under an absolute shebang because the Nix
+    // build sandbox (which runs these tests in checkPhase) provides /bin/sh
+    // but no /usr/bin/env.
     let fake = format!(
-        "#!/bin/sh\nset -eu\ncounter=\"{dir}/calls\"\nn=$(cat \"$counter\" 2>/dev/null || echo 0)\necho $((n + 1)) > \"$counter\"\nlast={last}\nif [ \"$n\" -gt \"$last\" ]; then n=$last; fi\ncat \"{dir}/response-$n.json\"\n",
+        "#!/bin/sh\nset -eu\ncounter=\"{dir}/calls\"\nn=$(cat \"$counter\" 2>/dev/null || echo 0)\necho $((n + 1)) > \"$counter\"\nlast={last}\nif [ \"$n\" -gt \"$last\" ]; then n=$last; fi\nbody=$(cat \"{dir}/response-$n.json\")\nif [ \"$body\" = \"{fail}\" ]; then echo 'HTTP 502: Bad Gateway' >&2; exit 1; fi\nprintf '%s\\n' \"$body\"\n",
         dir = dir.path().display(),
-        last = responses.len() - 1
+        last = responses.len() - 1,
+        fail = GH_FAIL
     );
     let gh = bin.join("gh");
     std::fs::write(&gh, fake).unwrap();
@@ -384,6 +387,10 @@ const RUN_FAILED: &str =
 #[cfg(unix)]
 const RUN_PENDING: &str =
     r#"[{"databaseId":1,"status":"in_progress","conclusion":null,"headBranch":"v1.2.3"}]"#;
+/// Sentinel response that makes the fake `gh` fail the call (see
+/// `run_wait_script`).
+#[cfg(unix)]
+const GH_FAIL: &str = "__GH_FAIL__";
 
 /// A green run passes the gate immediately.
 #[cfg(unix)]
@@ -426,6 +433,27 @@ fn ci_gate_refuses_when_no_run_exists_after_the_window() {
 #[test]
 fn ci_gate_refuses_when_only_failed_runs_exist() {
     assert_eq!(run_wait_script(&[RUN_FAILED], 0), 1);
+}
+
+/// A `gh` call that fails or answers with an empty body mid-wait is a missed
+/// poll, not a red CI: the gate keeps polling and passes once the API answers
+/// again. Without this a single 502 during a 20-minute wait failed the
+/// release of a green commit.
+#[cfg(unix)]
+#[test]
+fn ci_gate_retries_after_a_transient_gh_failure() {
+    assert_eq!(
+        run_wait_script(&[RUN_PENDING, GH_FAIL, "", RUN_SUCCESS], 0),
+        0
+    );
+}
+
+/// A `gh` that never answers must not spin until the job timeout: after the
+/// missed-poll budget the gate refuses.
+#[cfg(unix)]
+#[test]
+fn ci_gate_gives_up_when_gh_keeps_failing() {
+    assert_eq!(run_wait_script(&[GH_FAIL], 0), 1);
 }
 
 #[test]
