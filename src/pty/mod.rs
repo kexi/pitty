@@ -366,8 +366,24 @@ impl PtySession {
         };
         if !still_running {
             // Release the zombie now that the group sweep no longer needs its
-            // pid pinned. It has exited, so this returns at once.
-            let _ = self.child.try_wait();
+            // pid pinned. It has exited, so this returns at once; anything but
+            // a successful reap (or ECHILD from a reap that already happened
+            // elsewhere) is a teardown problem, not something to drop.
+            match self.child.try_wait() {
+                Ok(Some(_)) => {}
+                Ok(None) => fatal.push(
+                    "child observed as exited but the reap found it still running".to_string(),
+                ),
+                Err(e) => {
+                    #[cfg(unix)]
+                    let already_reaped = e.raw_os_error() == Some(libc::ECHILD);
+                    #[cfg(not(unix))]
+                    let already_reaped = false;
+                    if !already_reaped {
+                        fatal.push(format!("failed to reap exited child: {e}"));
+                    }
+                }
+            }
         }
 
         if still_running {
