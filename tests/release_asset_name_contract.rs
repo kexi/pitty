@@ -456,12 +456,112 @@ fn ci_gate_gives_up_when_gh_keeps_failing() {
     assert_eq!(run_wait_script(&[GH_FAIL], 0), 1);
 }
 
+/// Collect the `scope: level` pairs of the *top-level* `permissions:` block in a
+/// workflow, or `None` when the workflow declares no top-level block.
+///
+/// Hand-parsed rather than pulled through a YAML crate for the same reason as
+/// the rest of this module: the project ships no dev-dependencies, and a
+/// workflow's permissions block is a flat map of scalar `key: value` lines. The
+/// scan starts at a column-0 `permissions:` (so the narrower per-job blocks,
+/// which are indented, are not mixed in) and ends at the next column-0 key,
+/// which is what bounds the block in YAML's block-mapping grammar. Comment and
+/// blank lines inside the block are skipped so a rationale comment between
+/// entries neither ends the block nor counts as a scope.
+///
+/// Why pairs and not just the scope names: `contents: read` and
+/// `contents: write` are different grants, so an exclusivity check that only
+/// compared key names would miss a silent widening of the level.
+fn top_level_permissions(workflow: &str) -> Option<Vec<(String, String)>> {
+    let mut lines = workflow
+        .lines()
+        .skip_while(|line| *line != "permissions:")
+        .peekable();
+    lines.next()?;
+
+    let mut grants = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // A non-indented, non-empty line is the next top-level key: block over.
+        if !line.starts_with(' ') {
+            break;
+        }
+        let (scope, level) = trimmed
+            .split_once(':')
+            .unwrap_or_else(|| panic!("unexpected line in permissions block: {line:?}"));
+        grants.push((scope.trim().to_string(), level.trim().to_string()));
+    }
+    Some(grants)
+}
+
 #[test]
 fn release_grants_only_contents_write() {
-    // Least-privilege invariant: the workflow's only declared permission is
-    // `contents: write` (needed to create the Release and upload assets).
-    assert!(
-        RELEASE_YML.contains("contents: write"),
-        "release.yml must grant contents: write for Release uploads"
+    // Least-privilege invariant, stated as an EXCLUSIVE set: the workflow's
+    // top-level `permissions:` block grants `contents: write` (needed to create
+    // the Release, move the floating tags, and upload assets) and NOTHING else.
+    // The write-scoped GITHUB_TOKEN this workflow holds is the repo's most
+    // privileged credential, so any added scope — `packages: write`,
+    // `id-token: write`, `actions: write` — must fail here rather than merge
+    // green. Asserted as an equality on the parsed pairs, not a substring
+    // search, because a substring check is satisfied by the very line the
+    // invariant bounds and so can never fail (issue #41).
+    let grants =
+        top_level_permissions(RELEASE_YML).expect("release.yml must declare top-level permissions");
+    assert_eq!(
+        grants,
+        vec![("contents".to_string(), "write".to_string())],
+        "release.yml's top-level permissions must be exactly `contents: write`; \
+         found {grants:?}. Widening the release token's scope needs a deliberate \
+         change here plus a rationale in the workflow header."
+    );
+}
+
+/// The strengthened gate must actually reject a widened scope. Driving the
+/// parser with synthetic workflows proves the assertion above is load-bearing:
+/// the old substring check passed on every one of these.
+#[test]
+fn permissions_parser_distinguishes_widened_scopes() {
+    let good = "name: Release\npermissions:\n  contents: write\n\njobs:\n  x:\n";
+    assert_eq!(
+        top_level_permissions(good),
+        Some(vec![("contents".into(), "write".into())])
+    );
+
+    // An extra scope alongside `contents: write` — the exact regression #41
+    // describes — must produce a different set, so the gate fails.
+    let widened =
+        "name: Release\npermissions:\n  contents: write\n  id-token: write\n\njobs:\n  x:\n";
+    assert_eq!(
+        top_level_permissions(widened),
+        Some(vec![
+            ("contents".into(), "write".into()),
+            ("id-token".into(), "write".into()),
+        ]),
+        "an added scope must be visible to the gate"
+    );
+    assert_ne!(
+        top_level_permissions(widened),
+        top_level_permissions(good),
+        "a widened permissions block must not compare equal to the least-privilege one"
+    );
+
+    // Comments inside the block are not scopes and do not terminate it.
+    let commented =
+        "permissions:\n  # only what the Release upload needs\n  contents: write\njobs:\n";
+    assert_eq!(
+        top_level_permissions(commented),
+        Some(vec![("contents".into(), "write".into())])
+    );
+
+    // A per-job (indented) `permissions:` must not be read as the top-level
+    // block; without the column-0 anchor the narrower job block at release.yml's
+    // :96 would be picked up instead.
+    let job_only = "jobs:\n  ci-gate:\n    permissions:\n      contents: read\n";
+    assert_eq!(
+        top_level_permissions(job_only),
+        None,
+        "an indented per-job permissions block is not the top-level grant"
     );
 }

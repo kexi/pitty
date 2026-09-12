@@ -100,6 +100,139 @@ fn branding_scalar(key: &str) -> Option<String> {
     None
 }
 
+/// Extract the shell body of the `Install pitty` step from `action.yml`.
+///
+/// The body is the block-scalar under that step's `run: |`, indented eight
+/// spaces. Slicing it out lets the tests below execute the *real* installer
+/// logic rather than a transcription of it, so the gate cannot drift from what
+/// ships. The step is located by its `- name:` line so a reordering of the
+/// steps does not silently pick up the wrong `run:` block.
+///
+/// Gated to unix alongside its only caller: slicing the body out is only useful
+/// where the tests can actually execute it under bash, and an ungated helper
+/// would be dead code on the Windows leg of CI.
+#[cfg(unix)]
+fn install_step_script() -> String {
+    const INDENT: &str = "        ";
+    let mut lines = ACTION_YML
+        .lines()
+        .skip_while(|l| l.trim() != "- name: Install pitty")
+        .skip_while(|l| l.trim() != "run: |")
+        .skip(1)
+        .peekable();
+    let mut body = String::new();
+    for line in lines.by_ref() {
+        // The block scalar ends at the first non-blank line that is not indented
+        // at least as far as its content (the next step's `- name:`).
+        if !line.trim().is_empty() && !line.starts_with(INDENT) {
+            break;
+        }
+        body.push_str(line.strip_prefix(INDENT).unwrap_or(""));
+        body.push('\n');
+    }
+    assert!(
+        body.contains("PITTY_REF="),
+        "could not slice the Install pitty script out of action.yml"
+    );
+    body
+}
+
+/// Run the real installer body with a fake `pitty` already on PATH, returning
+/// its combined output.
+///
+/// The download and the cargo fallback are neutralized by pointing `PITTY_REPO`
+/// at an unroutable URL and stubbing `curl`/`git`/`cargo` as failures, so the
+/// script reaches its reuse-or-install decision and then stops. What the caller
+/// reads back is which branch it took: the reuse message, or the download
+/// attempt that proves the pin was honored.
+#[cfg(unix)]
+fn run_installer_with_pitty_on_path(input_ref: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+
+    // A `pitty` on PATH stands in for a self-hosted runner image or an earlier
+    // install step. Stubs for the network tools make every install route fail
+    // loudly and immediately instead of reaching out.
+    for (name, body) in [
+        ("pitty", "#!/bin/sh\nexit 0\n"),
+        ("curl", "#!/bin/sh\nexit 1\n"),
+        ("git", "#!/bin/sh\nexit 1\n"),
+        (
+            "cargo",
+            "#!/bin/sh\necho 'cargo install attempted' >&2\nexit 1\n",
+        ),
+    ] {
+        let path = bin.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let script = dir.path().join("install.sh");
+    std::fs::write(&script, install_step_script()).unwrap();
+
+    let out = std::process::Command::new("bash")
+        .arg(&script)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("PITTY_INPUT_REF", input_ref)
+        .env("PITTY_ACTION_REF", "v1")
+        .env("PITTY_REPO", "https://github.com/kexi/pitty")
+        .env("RUNNER_OS", "Linux")
+        .env("RUNNER_ARCH", "X64")
+        .env("RUNNER_TEMP", dir.path())
+        .env("GITHUB_PATH", dir.path().join("github_path"))
+        .output()
+        .expect("bash must be available to run the installer body");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// (#42) An explicit `version:` pin is authoritative. What is guaranteed: with a
+/// `pitty` already on PATH *and* `version:` set, the installer does not
+/// short-circuit on the pre-existing binary — it goes on to install the pinned
+/// ref, so the caller gets the ref they named rather than whatever the machine
+/// happened to have. This is the reproducibility bug: before the fix the script
+/// exited at the PATH check before `version:` was ever read.
+#[cfg(unix)]
+#[test]
+fn an_explicit_version_pin_overrides_a_pitty_already_on_path() {
+    let output = run_installer_with_pitty_on_path("v1.2.0");
+    assert!(
+        !output.contains("reusing it"),
+        "a pinned version must not be satisfied by a pre-existing binary: {output:?}"
+    );
+    assert!(
+        output.contains("pitty-v1.2.0-Linux-X64.tar.gz") || output.contains("cargo install"),
+        "the pinned ref v1.2.0 must drive an install attempt: {output:?}"
+    );
+    assert!(
+        output.contains("version: v1.2.0 was pinned"),
+        "the caller must be told their pin overrode the binary on PATH: {output:?}"
+    );
+}
+
+/// (#42) With no `version:` pinned, a pre-existing `pitty` is still reused
+/// as-is. What is guaranteed: the fix narrows the short-circuit to the unpinned
+/// case rather than removing it, so self-hosted runners and jobs that
+/// pre-install pitty keep working without a download.
+#[cfg(unix)]
+#[test]
+fn an_unpinned_run_reuses_a_pitty_already_on_path() {
+    let output = run_installer_with_pitty_on_path("");
+    assert!(
+        output.contains("already on PATH") && output.contains("reusing it"),
+        "an unpinned run must reuse the binary already on PATH: {output:?}"
+    );
+    assert!(
+        !output.contains("cargo install"),
+        "an unpinned run with pitty present must not install anything: {output:?}"
+    );
+}
+
 #[test]
 fn action_has_name_and_description() {
     let name = top_level_scalar("name").expect("action.yml must declare a top-level `name:`");
