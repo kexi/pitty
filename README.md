@@ -88,7 +88,7 @@ workspace:
   cwd: .                          # run dir, relative to the scenario file
   temp: true                      # OR run in a fresh temp dir (0700 on Unix)
 steps:
-  - spawn: bash
+  - spawn: bash                                   # split on whitespace; add `split: posix` for shell quoting
   - send: echo ${username}                        # stdin line; \r (CR) appended; ${var} expanded
   - send_raw: "y"                                 # raw bytes, no newline
   - key: enter                                    # named key -> control bytes
@@ -133,18 +133,53 @@ A scenario may declare `version: 1` (the default when omitted). A newer version
 this build does not understand is a Scenario error rather than a silent
 mis-parse. Unknown **top-level** keys (e.g. a `stesp:` typo) are also rejected;
 nested step/spec fields stay lenient so a scenario written for a newer `1.x`
-pitty still runs on an older one. See [`COMPATIBILITY.md`](COMPATIBILITY.md)
+pitty still *parses and runs* on an older one — though a field the older build
+does not know is ignored, so the scenario may not mean the same thing there.
+See [`COMPATIBILITY.md`](COMPATIBILITY.md)
 for the full SemVer policy on the scenario format and the report JSON, and
 [`CHANGELOG.md`](CHANGELOG.md) for the version history.
 
-### `send` and `env` semantics
+### `spawn`, `send` and `env` semantics
 
+- **`spawn`** takes a command line as a single string. By default it is split
+  on **whitespace only**: quotes and backslashes are ordinary bytes, so
+  `spawn: "echo 'hello world'"` makes the child print the quotes and
+  `spawn: "sh -c 'exit 3'"` tries to run the program `'exit`. Add
+  **`split: posix`** (mapping form only) to get **POSIX shell word rules**
+  instead — `'single quotes'`, `"double quotes"`, and backslash escapes group,
+  and the quote characters are consumed rather than passed to the child:
+
+  ```yaml
+  - spawn:
+      command: "sh -c 'exit 3'"
+      split: posix
+  ```
+
+  The whitespace rule remains the default because the v1 compatibility contract
+  forbids changing the meaning of an existing field — see
+  [`COMPATIBILITY.md`](COMPATIBILITY.md). For the same reason an unrecognized
+  `split` value — of any type, including a number, list or mapping — is **not**
+  an error (older pitty releases ignore the field entirely, so this one may not
+  be stricter): it falls back to the default rule and warns on stderr. Note that `split: posix` on a pitty predating the field
+  is ignored, so such a scenario runs there with whitespace splitting — usually
+  failing the very assertion that motivated the opt-in. Under `split: posix` an
+  unterminated
+  quote is a process error (exit 3) rather than a best-effort split, and the
+  rules apply on **every platform including Windows** (pitty builds an argv, and
+  portable-pty re-quotes it for Windows), so a Windows path needs quoting:
+  `command: "'C:\\Program Files\\app.exe'"`. **No shell is interposed** under
+  either rule — pitty execs the program directly — so pipes, redirection, and
+  globbing need an explicit shell (`sh -c '...'`). There is no array (`argv`)
+  form; quoting plus `split: posix` is how an argument with spaces is expressed.
+  Full rules in [`SCHEMA.md`](SCHEMA.md#spawn-command-tokenization).
 - **`send`** appends a carriage return (`\r`, the canonical-mode line
   terminator a PTY expects from Enter) and expands `${var}` placeholders.
 - **`send_raw`** writes bytes verbatim with no terminator. `${var}` is still
   expanded; use `$$` for a literal `$`.
 - **`env`** at the top level applies to every `spawn`. A `spawn`'s own `env`
-  is merged on top and wins on conflicts.
+  is merged on top and wins on conflicts. Values on both levels are
+  `${var}`-expanded, but an `env` value cannot reference a sibling `env` key —
+  only `variables` and the parent environment are in scope.
 - **`${var}`** is resolved in order: (1) scenario `variables`, (2) the **parent
   process environment** (so `export MY_VAR=value` before `pitty run` lets a
   scenario reference `${MY_VAR}` — e.g. in `spawn.command` — without editing the
@@ -331,10 +366,90 @@ session directly.)
     settled, or `raw: true` for an exact record.
 - **Path is confined to the workspace.** Because a snapshot may be *written*
   under `--update`, the `file` path is resolved **inside the workspace
-  directory**: a path that escapes via `..` or an out-of-workspace symlink is a
-  **scenario error** (exit 2) and nothing is written. (Read-only file
-  assertions are not confined under the single-trust model; only snapshot
-  *writes* are.)
+  directory**: a path that escapes via `..` is a **scenario error** (exit 2) and
+  nothing is written. A `file` path through a **symlink** is judged by where the
+  link leads: one resolving *inside* the workspace is followed (so an
+  in-repository `snapshots -> real` keeps working), one resolving *outside* is a
+  scenario error, and a **dangling** link — whose target does not exist yet — is
+  resolved by hand and judged the same way, so `out.snap -> real/out.snap`
+  records while `out.snap -> ../outside/x` is refused. A chain of links is
+  followed to its end, and one the running kernel refuses to resolve — `ELOOP`,
+  from a cycle or from that platform's own hop limit (32 on macOS, 40 on Linux) —
+  is refused rather than resolved by hand; pitty adopts the kernel's verdict
+  instead of reimplementing the limit, and imposes **no length bound of its own**,
+  so a chain the kernel accepts resolves, up to a visited-set cap that exists
+  only so a pathological chain cannot exhaust memory. A dangling cycle, which no
+  single kernel call can detect, is caught by remembering the paths already
+  visited. A `..` in the path may only cancel a component the kernel can actually
+  **traverse**, and it is judged at the position the kernel would be standing in
+  — following any symlink already crossed, so `link/..` steps to the *link
+  target's* parent rather than to the lexical one. **Both halves of that sentence
+  hold only absent a concurrent mutation of the path by the program under test**
+  — a child racing the resolver can defeat either; see
+  [`SECURITY.md`](SECURITY.md), *Residual: the path-mutation race*, which is
+  **not** closed. (Asking about the lexical
+  parent let `link/../missing/../victim.snap` pass by checking a `missing` that
+  exists beside the link while the kernel was looking at the destination, where
+  it does not.) Traversability itself is asked of the kernel rather than inferred
+  from the component: `link/../out.snap` where `link -> missing`
+  (`ENOENT`), `blocker/../out.snap` where `blocker` is a regular file
+  (`ENOTDIR`), and `locked/../out.snap` where `locked` is a directory with no
+  search permission (`EACCES`) are all refused rather than quietly resolving onto
+  a real neighbouring file. That last one is a directory by every attribute test,
+  which is why the question is put to the kernel. Where the platform has no
+  `O_SEARCH` (glibc Linux), the check cannot ask for search access directly, so
+  it *performs* the traversal instead of predicting it — it opens `dir/.`, which
+  the kernel can only resolve by descending through `dir`. Every case there
+  either matches the kernel or is stricter; the one difference is a `0100`
+  directory (searchable, not readable), which is refused though the kernel would
+  allow it — a false refusal reported as a failed assertion, never a false pass.
+  A `..` across a merely **absent** component is allowed only under `--update`,
+  which is about to create it; on a verifying run nothing creates it, so
+  `missing/../out.snap` is refused there too rather than silently comparing
+  against a neighbouring file.
+
+  Those last refusals are **failed assertions** (exit 1) and appear in the report
+  like any other failing step, because the path is one the *filesystem* would
+  have rejected — pitty declines it up front instead of discovering it
+  mid-write, so nothing is truncated on the way. Only a path that is wrong
+  however the filesystem is arranged — one escaping the workspace — is a
+  **scenario error** (exit 2, no report), because there the YAML itself must
+  change. A link in the *middle* of the
+  path keeps everything after it — `link -> missing-dir` with
+  `file: link/out.snap` records at `missing-dir/out.snap` — and that combined
+  location is what containment judges. What gets walked is the link's
+  target, never the link's own name, so re-pointing it after resolution does not
+  redirect the write — *provided nothing is mutating the path concurrently*. A
+  program that races the resolver is a separate and **unclosed** limit; see
+  [`SECURITY.md`](SECURITY.md), *Residual: the path-mutation race*.
+  On Unix the write never re-walks the
+  path by name: the workspace directory is captured as a file descriptor before
+  any scenario process is spawned, and the recorder descends from that
+  descriptor one component at a time with `openat(O_DIRECTORY | O_NOFOLLOW)`.
+  So a link planted *after* the check cannot redirect the write to a different
+  target — at the final component or at an intermediate directory — and neither
+  can renaming the workspace itself and putting a symlink in its place. What
+  that does **not** cover is a child mutating the path *between* two of pitty's
+  syscalls: that can still leave a write in a stale directory, or make a verify
+  pass against a file planted there (same unclosed limit as above).
+  The components walked are the ones containment
+  validated, normalized and `..`-free, so a `file:` that detours outside the
+  workspace before returning to it creates nothing outside. The comparison read
+  uses that same traversal, so both halves name the same file and a snapshot
+  planted *outside* the workspace cannot satisfy the assertion — a guarantee
+  that the two halves agree, not that the directory is the one you meant. A snapshot file that is a **hard link** (link count
+  above one) is refused by both the read and the write, since a second name may
+  reach outside the workspace and `O_NOFOLLOW` cannot detect one. A `file:` that
+  is not a **regular file** — a FIFO, directory, socket or device node — is also
+  refused rather than read or written: opening a FIFO would otherwise block the
+  run indefinitely waiting for a peer that may never arrive.
+  Components above the workspace are never traversed.
+  Windows lacks the `openat`-based symlink-race protections, so there the
+  resolver's check is the only guard against a link — but the `..`-detour
+  guarantee above holds on Windows too, because the path written is rebuilt from
+  the validated components rather than the raw `file:` string.
+  (Read-only file assertions — `expect_file_*` — are a different thing and are
+  not confined under the single-trust model; only snapshot paths are.)
 - **Recording / updating** happens only with `--update` (or
   `PITTY_UPDATE_SNAPSHOTS` set to `1`, `true`, or `yes`):
   - file absent, no `--update` → **fail** (`not recorded; rerun with --update`).
@@ -349,7 +464,15 @@ session directly.)
 > **Security note:** snapshot files are a faithful record of real output and are
 > written **unmasked** (masking them would make comparison meaningless). A
 > snapshot may therefore contain secrets — do not snapshot sensitive output, and
-> `.gitignore` snapshot files that could capture secrets.
+> `.gitignore` snapshot files that could capture secrets. Because the content is
+> unmasked, pitty makes snapshot files `0600` on Unix *before any content is
+> written to them* (including one recorded `0644` by an older pitty), and
+> creates any snapshot directory it makes itself as `0700`, so another local
+> user on a shared runner cannot read them. pitty does **not** change the mode
+> of a directory that already exists — recording `file: out.snap` into your
+> repository leaves the checkout's own permissions alone. Windows uses the
+> runner user's default ACLs. That protects local *read* access, not accidental
+> commit — the `.gitignore` advice still applies.
 
 ### `expect_semantic`: fuzzy text match
 
@@ -496,8 +619,8 @@ JSON with `--json`. A single-axis matrix prints `value  PASS/FAIL  (ms)`; a
 multi-axis matrix prints each cell's coordinates as `key=value key=value  PASS/FAIL (ms)`
 (one space before the verdict) so every cell is self-describing. The exit code is
 the worst across cells (one failing cell fails CI); `--no-fail` walks every cell
-and always exits 0 for the "observe all implementations" use case. **`--no-fail`
-suppresses only red (assertion-failing) cells.** A hard fault — a spawn failure or
+and exits 0 despite red ones, for the "observe all implementations" use case.
+**`--no-fail` suppresses only red (assertion-failing) cells.** A hard fault — a spawn failure or
 a scenario error in a cell — aborts the matrix at that cell (later cells do not
 run) and still exits with its class (scenario 2 / process 3) even under
 `--no-fail`, because a broken harness is not an "informational" red cell.
@@ -612,6 +735,13 @@ installer defaults to the same ref used in `uses: kexi/pitty@...`, so
 semver-pinned action refs get the matching fast path on those platforms. The
 step's exit code is the verdict, so a failing scenario fails the job.
 
+An explicit `version:` is **authoritative**: the pinned ref is installed and
+takes precedence even when a `pitty` binary is already on the runner's `PATH`
+(a self-hosted runner image, a cached tool directory, or an earlier step). When
+`version:` is omitted, a `pitty` already on `PATH` is reused as-is and nothing
+is downloaded — so pre-provisioned runners keep working, and a caller who wants
+a specific build asks for it by pinning.
+
 The action is published to the GitHub Marketplace as
 [**pitty-action**](https://github.com/marketplace/actions/pitty-action) (the
 bare name `pitty` is taken by an unrelated GitHub user; the Marketplace listing
@@ -631,6 +761,13 @@ or unwritable summary file is ignored. All summary and annotation text is
 **secret-masked**: any `secret: true` variable's value is replaced with `***`
 before it can reach the summary, an annotation, or the CI log.
 
+Annotations are written to **stderr**, never stdout. stdout stays pitty's
+machine-readable channel — `run` always prints a JSON report there, and
+`matrix`/`bench` do under `--json` — so `pitty matrix --json scenario.yaml | jq`
+keeps working on a runner even when a cell fails and an annotation is emitted.
+GitHub parses workflow commands off both streams, so the inline run/PR
+annotations appear either way.
+
 To preview the output locally without a runner:
 
 ```sh
@@ -649,14 +786,116 @@ cat /tmp/summary.md
 
 When running multiple scenarios (or matrix cells), the final exit code is the
 most severe outcome: process (3) > scenario (2) > assertion (1) > success (0).
-`pitty matrix --no-fail` overrides this to always exit 0.
+`pitty matrix --no-fail` suppresses **assertion** failures only, exiting 0 for a
+run whose cells merely went red. A hard fault — a scenario error (2) or a process
+error (3) — still exits with its own class, because a broken harness is not an
+informational result. See
+[Matrix: run one scenario across many values](#matrix-run-one-scenario-across-many-values)
+for the full rule.
 
 ## Logs
 
-Each run writes `logs/<scenario>.log` containing the captured terminal output
-and per-step results. Log files are created with `0600` permissions on Unix
-(Windows uses the runner user's default file ACLs), and registered secret values
-are replaced with `***` before anything is written.
+Every run writes a log containing the captured terminal output and per-step
+results — including a run that never spawned a process, whose output section
+reads `(no process spawned)`. When a scenario spawns more than once, each
+session's output appears under its own `--- session N ---` banner, so every
+assertion in the file is backed by the output that produced it.
+
+The file name identifies the run:
+
+| Case | Log file |
+|------|----------|
+| `echo-flow.yaml` declaring `name: echo-flow` | `logs/echo-flow.log` |
+| `a.yaml` declaring `name: other` | `logs/a.other.log` |
+| `pitty matrix m.yaml` (`name: m`, axis `word`) | `logs/m.word-<value>.log` per cell |
+
+The scenario's `name:` is the base. The **file stem** is prefixed only when it
+differs from the name, so a scenario that follows the usual convention keeps the
+familiar `logs/<scenario>.log`, while two files declaring the same `name:` no
+longer overwrite each other in a directory run. **Matrix cell coordinates** are
+appended so each cell keeps its own diagnostics.
+
+Secrets registered with `secret: true` are masked out of the *filename* too,
+wherever they appear in the components this scheme adds — the scenario file's
+stem and a matrix cell's axis names and values. Because masking is many-to-one,
+a name whose masking removed text gains a short digest suffix so two runs
+differing only inside a secret still get separate logs; a filename with no
+secret in it is left exactly as it reads above. (A secret in the scenario's own
+`name:` is tracked separately as issue #43 and is not yet masked.)
+
+A scenario written `.yml` carries its extension in the name (`a-yml.<scenario>.log`),
+since `pitty run <dir>` executes `a.yaml` and `a.yml` as two separate scenarios;
+the canonical `.yaml` spelling stays unmarked. A name that would exceed the
+filesystem's limit is shortened, with a digest replacing the dropped tail, so an
+over-long matrix axis value still produces a log instead of failing to write one.
+
+Each part is reduced to `[A-Za-z0-9._-]`. Log files are created with `0600`
+permissions on Unix (Windows uses the runner user's default file ACLs), and
+registered secret values are replaced with `***` before anything is written.
+
+**Ownership.** Each log has a hidden sidecar, `.<log name>.claim`, recording
+which scenario wrote it: the scenario's identity *after secret masking*, plus a
+random per-log token. That record is what lets a re-run reuse its own file
+instead of accumulating numbered copies, so in the ordinary case the log you open
+after a failure is the newest one. A log with no sidecar — an older pitty's, or
+one restored without its dotfiles — belongs to nobody pitty can verify, so it is
+left untouched and the run writes alongside it (its name is then taken by a
+suffixed `<stem>.2.log`, and the stale file stays). A run never *overwrites*
+another scenario's log: where two identities would land on one name, the later
+one is suffixed instead.
+
+On Unix a lock on the sidecar also keeps two concurrent pitty runs from writing
+one file at once. That lock is advisory, so it does not constrain anything but
+pitty, and on a network filesystem that accepts `flock` without sharing locks
+between clients two hosts can still interleave; see `SECURITY.md` for the exact
+scope.
+
+**One limit worth knowing.** Because the record stores the *masked* identity, two
+matrix cells whose axis values differ only inside a secret are indistinguishable
+on disk — their records are byte-identical, and the random token cannot help,
+since a later process has no way to recompute which token was its own. They
+always get separate logs and the set of logs is stable across runs, but **which
+of the two a given cell reuses is not guaranteed**: on a later run the two can
+swap files. Binding them would require a value a cell can reproduce but a reader
+of `logs/` cannot invert, which is not achievable for a low-entropy secret. This
+is the one case where "each scenario reuses its own file" holds only for the
+*pair*, not for each cell individually.
+
+Neither dotfile is a log, and `logs/*.log` globs skip both.
+
+`logs/` is a unit: preserve or discard it whole, dotfiles included. Restoring
+only `logs/*.log` drops the `.claim` sidecars, which are what record ownership —
+a restored log without its sidecar is treated as belonging to nobody, so pitty
+leaves it untouched and writes alongside it under a new name. Nothing is
+destroyed, but the old logs stop being reused.
+
+If a log cannot be written at all — a full disk, an unwritable `logs/`, or every
+candidate name already held by other scenarios — pitty prints a warning on
+stderr and leaves the run's verdict alone. It never resolves a name collision by
+overwriting another scenario's log. **On Unix**, a `logs/` directory that is a
+symlink is refused, and a symlink planted at a log's own name is never written
+through — a log always lands inside `logs/`, never at a link's target. `logs/` is
+opened from a descriptor taken before the scenario starts, so replacing it with a
+symlink mid-run cannot redirect the write either; if that descriptor cannot be
+obtained, the log is skipped with a warning rather than written to an
+unprotected path.
+
+**On Windows none of those log guarantees hold.** There is no pre-spawn
+descriptor and the log path is resolved by name on each use, so a directory
+junction at `logs/` pointing elsewhere, or a link swapped in after the name is
+chosen, redirects the write. Log content is masked, which bounds the exposure,
+but do not rely on log containment on Windows. (This differs from *snapshot*
+writes, whose `..`-detour containment does hold on Windows — see the security
+section. The difference is not an oversight: a snapshot path is author-supplied
+and can contain `..`, so validating its components is what makes containment
+achievable without `openat`. A log name has no author-supplied path in it — the
+directory is the fixed literal `logs/` and the file name is reduced to
+`[A-Za-z0-9._-]`, so no separator survives — which leaves only the symlink races
+that genuinely require `openat` to close.)
+
+The log is a diagnostics sink, not an assertion, so its failure is reported
+rather than counted against the program under test; stdout stays a clean JSON
+report.
 
 ## Security and trust model
 
@@ -667,10 +906,59 @@ are replaced with `***` before anything is written.
 
 Minimal guards (in place since v0.1):
 
-- **Temp/log permissions.** `workspace.temp: true` uses `tempfile::TempDir`
-  (atomic temp-directory creation, no self-chosen names). On Unix, temp
-  workspaces are set to `0700` and logs to `0600`; on Windows, pitty relies on
-  the runner user's default ACLs.
+- **Temp/log/snapshot permissions.** `workspace.temp: true` uses
+  `tempfile::TempDir` (atomic temp-directory creation, no self-chosen names). On
+  Unix, temp workspaces are set to `0700`, logs to `0600`, and recorded
+  snapshots to `0600` — applied to the descriptor before any content is written,
+  so refreshing a snapshot an older pitty left at `0644` never exposes the new
+  content — because snapshot content is unmasked. Snapshot directories **pitty
+  creates** are `0700`; a directory that already exists keeps the mode it has,
+  since it belongs to the user (tightening a shared repository checkout to
+  `0700` would lock out other users and later CI steps). On Windows, pitty
+  relies on the runner user's default ACLs.
+- **Snapshot reads and writes do not follow a symlink at use time** (Unix; see
+  the caveats at the end of this bullet). A `file`
+  path through a link that lands *outside* the workspace is a scenario error,
+  whether the link resolves or dangles; one that lands inside is followed once
+  during resolution and thereafter only its target is walked, so the link's own
+  name is never opened. A symlink cycle is refused. On Unix the write
+  additionally descends with
+  `openat(O_DIRECTORY | O_NOFOLLOW)` per component, starting from a descriptor
+  for the workspace directory captured before any scenario process was spawned,
+  and creates the file relative to that descriptor. So a link planted after the
+  check cannot redirect it at the final component *or* at an intermediate
+  directory, and a child that renames the workspace and leaves a symlink in its
+  place cannot redirect it either. The walked components are the normalized,
+  `..`-free sequence containment approved, so nothing is created outside the
+  workspace even when the `file:` value detours through a parent directory.
+  The **comparison read uses the same traversal**, so a snapshot planted outside
+  the workspace cannot make an assertion pass. (That is a statement about where
+  the traversal can reach, not about a program racing it: a child that mutates a
+  path component between two of pitty's syscalls can still steer the shared
+  traversal into a stale directory and make an assertion pass there. That class
+  is documented as unclosed in [`SECURITY.md`](SECURITY.md) under *Residual: the
+  path-mutation race*; do not rely on snapshot containment against a program
+  that is actively racing it.) **Hard links are refused** on
+  both halves: a hard link is not a symlink, so `O_NOFOLLOW` cannot see one, and
+  a file linked to an external inode would otherwise be read from and written
+  through; pitty `fstat`s the descriptor it opened and refuses a link count above
+  one. (Residual: an attacker who adds a link *after* that check can read what
+  pitty subsequently writes, which no check at this layer can prevent; it cannot
+  redirect a write or make a planted file pass.) If the workspace descriptor
+  cannot be captured, a run that records a snapshot fails rather than falling
+  back to an unprotected write — but a scenario with no `expect_snapshot` step
+  never needs *that* descriptor, so a search-only (`0300`) workspace still runs
+  its steps. (Log writing has a separate pre-spawn descriptor, taken on the
+  scenario file's directory rather than the workspace, under the same
+  fail-closed rule — so such a run can still lose its log. See *Log files*.) Where `O_SEARCH` exists (macOS) such a workspace supports snapshots too,
+  since a traversal needs search permission rather than read. Components above
+  the workspace are never traversed. **On Windows** there is no `openat`, so
+  none of the *symlink and hard-link races* above are closed — a junction or a
+  link swapped in after the resolver's check redirects the write. What does
+  still hold there is `..` containment: the path written is rebuilt from the
+  validated component sequence, which needs no `openat`, so a `file:` that
+  detours through a parent creates nothing outside the workspace on any
+  platform.
 - **Secret masking.** Variables flagged `secret: true` have their literal
   value masked (`***`) in logs and error messages.
 - **Best-effort cleanup.** Temp directories are removed when their `TempDir`

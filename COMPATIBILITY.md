@@ -39,6 +39,232 @@ additive optional field an older pitty does not know) still parses on the
 older pitty — the unknown field is ignored, not rejected. This is what makes
 the "additive only within 1.x" promise safe in both directions.
 
+### Worked example: a fix that had to be scoped, not reverted
+
+`expect_json`'s `equals: null` is the case to reason from when a fix is
+*obviously* right and still breaks the contract. Before 1.3, an explicitly
+written `equals: null` was discarded while deserializing: paired with another
+check it silently ran that other check and threw the null assertion away — a
+false-green. Making it a real check was correct, but it also made two previously
+*executing* documents (`equals: null` with `contains`, and with `exists`) trip
+the one-of guard and become Scenario errors.
+
+That is the forbidden transition, and the tempting argument — "the old behaviour
+verified nothing, so nobody could depend on it" — is not one of the exceptions
+above. Dependence is not the test; **execution** is. A pipeline can branch on
+exit 1 (assertion failed) versus exit 2 (scenario error) without caring what the
+assertion meant. The argument is also unfalsifiable: every tightening can be
+described as fixing something nobody should have relied on.
+
+The resolution was to scope the fix rather than abandon it. `equals: null` alone
+now asserts null — 1.2.2 rejected that, so it is a pure loosening. The two shapes
+1.2.2 executed keep executing, with the null dropped as before. Every shape 1.2.2
+rejected stays rejected. The false-green is gone for new scenarios without any
+existing one changing its exit code.
+
+### Worked example: improving a rule without changing it
+
+`spawn.split` shows how a genuinely better behavior ships under these rules
+without breaking anyone, and is the case to reason from next time — including
+the part that is *not* clean.
+
+`spawn` tokenizes its command line with a plain whitespace split, which is a
+footgun: quotes are not grouping syntax, so `spawn: "echo 'hello world'"` makes
+the child print the quote characters and `spawn: "sh -c 'exit 3'"` runs the
+program `'exit`. POSIX shell word rules are what authors expect and what the
+format should arguably have specified from the start.
+
+Applying them unconditionally would nonetheless have been a **breaking change**
+under the rules above — it changes the meaning of an existing field, and it
+turns a previously valid command line (an unterminated quote) into an error.
+The breakage is concrete, not hypothetical: a scenario using
+`spawn: "echo 'hello world'"` whose `expect_snapshot` was recorded on 1.2.2 has
+the literal bytes `'hello world'` on disk, and an unconditional switch fails
+that scenario on a patch-level upgrade.
+
+So the better rule shipped as an **optional field** instead —
+`spawn: {command: ..., split: posix}` — with the historical behavior as the
+default. Authors opt in per `spawn`; nothing already written changes meaning.
+Making `posix` the default is reserved for `2.0`.
+
+#### The new field must itself be lenient
+
+The first attempt at this field got a *second* compatibility break from the fix
+for the first one, so the trap is worth naming.
+
+`split` was initially strict about its value: `split: pisox` was a parse error,
+by analogy with `key` and `source`, which reject unknown values. That analogy is
+wrong. `key` and `source` existed in `1.0`, so an unknown value for them is
+already an error on every `1.x` runner, and a new runner rejecting it agrees
+with the old one. `split` did **not** exist, so an older runner accepts
+`split: <anything>` and ignores it (nested fields are lenient — see *Forward
+compatibility* above). Rejecting it in a newer runner therefore tightens
+validation so a previously valid scenario becomes an error, which is the very
+clause this field was added to respect.
+
+An unrecognized `split` value is consequently **not** an error: it falls back to
+the default rule and warns on stderr. The general rule:
+
+> A field added within `1.x` may not reject any value **or any type**, because
+> every runner that predates the field accepts all of them. Only a field that
+> shipped in `1.0` can validate its value set.
+
+The type half is easy to miss and was missed here once: making `split` a
+string-typed field still rejected `split: 42`, and because the `spawn` wire form
+is an untagged enum, that type mismatch rejected the *whole* `spawn` map with a
+message that never mentioned `split`. A field added within `1.x` must therefore
+deserialize from an arbitrary value and interpret it afterwards, not constrain
+its type in the deserializer. The same applies to the published JSON schema: its
+entry for such a field carries no `type`, `enum` or `pattern`, only `examples`.
+
+#### What this does *not* buy you
+
+A scenario using a newer `1.x` field still parses on an older runner — that is
+the forward-compatibility promise — but it **does not mean the same thing**
+there. `split: posix` on a pitty predating the field is silently ignored and the
+command is whitespace-split.
+
+This is a real limitation of additive evolution and not something the field can
+fix: an old binary cannot be taught to refuse a document it was built to accept.
+The `version` field cannot be pressed into service either — it is an integer
+pinned to `1`, and any value an old runner refuses (`2`, or a non-integer) is
+itself the breaking change, so there is no way for a v1 scenario to declare a
+minimum feature level.
+
+In practice the failure is loud rather than silent, because the assertions that
+motivate `split: posix` are exactly the ones that break without it: on 1.2.2,
+`sh -c 'exit 3'` reports `expected exit code 3, got 2`, and a snapshot recorded
+under `posix` mismatches with `-hello world +'hello world'`. The scenario fails;
+it does not pass with the wrong meaning. Authors who need a hard guarantee
+should pin a minimum pitty version in CI rather than rely on the scenario file
+to enforce it.
+
+The generalizable rules: when an existing behavior turns out to be wrong, within
+`1.x` the fix is a new optional field that selects the new behavior, not a
+redefinition of the old one — however obviously correct the new behavior is. The
+new field must accept every value, since older runners do. And "still parses on
+an older pitty" is not "still means the same thing"; say which one you are
+promising.
+
+### Accepted break: `expect_json` extraction and quoted log noise
+
+The rules above have one deliberate exception, recorded here because it is a
+break rather than an example of avoiding one.
+
+Through `1.2.2`, locating the trailing JSON block counted `"` characters from the
+start of the captured output and treated a `{` at odd parity as string data. That
+rule is not merely imprecise, it is unsound on terminal output, which has no
+obligation to balance its quotes: a single stray quote anywhere earlier —
+including an ordinary JSON-escaped log line such as `msg: \"hi\"` — made pitty
+either fail to find a valid report at all, or silently assert against an **older**
+block further up the buffer. Both were filed as bugs.
+
+Extraction now derives string state from a structural opening brace outward, so
+the surrounding text's quote parity cannot affect which block is chosen. The two
+behaviors are driven by the same signal and cannot both be had: the input that
+motivates keeping the old rule (a JSON-looking substring inside quoted prose) and
+the inputs that motivate replacing it are indistinguishable by quote parity.
+
+**What changes for an existing scenario:** if a run produces *no* real JSON block
+at all, and its output contains a JSON-looking substring inside quoted prose, an
+`expect_json` step that previously failed now passes.
+
+A JSON-looking run inside quoted log prose is ranked below any block outside it,
+so it cannot displace a genuine report — including when the surrounding log line
+contains backslash-escaped quotes, which are honoured as escapes exactly as
+`1.2.2` honours them. An unquoted later block still wins on tail position, as it
+did before.
+
+The verdict can still differ from `1.2.2` when a quoted run is left
+**unterminated at end of line**: `1.2.2` masks the remainder of the buffer from
+that quote onward, while extraction re-derives quoting per line. That is the same
+deliberate break — the whole-buffer parity it removes is exactly what previously
+lost real reports and returned stale ones.
+
+This was taken deliberately in preference to preserving a rule that loses or
+misidentifies real reports. It is noted here so the divergence is discoverable
+from the contract rather than only from the changelog.
+
+### Accepted break: scenario-level `env` is `${var}`-expanded
+
+Through `1.2.2`, values under the top-level `env:` key were passed to the child
+verbatim, while `spawn.env` values a few lines away in the same merge were
+expanded. A `${who}` in a scenario-level `env` value therefore reached the child
+as the literal text `${who}`.
+
+That was an implementation defect rather than a documented behavior: `SCHEMA.md`
+has listed scenario-level `env` values as a `${var}` expansion site since `1.0`,
+alongside `spawn.command`, `spawn.env`, and the `send` payloads. The contract's
+unit is a scenario **valid under the published format**, and a scenario relying
+on the literal text was relying on the code contradicting the spec it was written
+against.
+
+**What changes for an existing scenario:** every scenario-level `env` value now
+goes through the expander, but only two constructs actually change meaning — a
+**resolvable** `${name}` (one defined in `variables` or in the parent
+environment) now expands, and `$$` collapses to a single literal `$`. Everything
+else is byte-for-byte as in `1.2.2`: a bare `$` is untouched (`"$PATH"`,
+`"price: $5"`, a trailing `"$"`), and an **unresolvable** `${name}` stays
+literal. To keep a literal, double the `$` — `$${name}` yields `${name}`, and
+`$$$$` yields `$$`.
+
+Fixing this also closed a masking hole: a `secret: true` variable referenced from
+a scenario-level `env` value never reached the child at all, and the literal
+placeholder that did was not a secret, so nothing was masked.
+
+### Accepted break: a workspace replaced mid-run is refused
+
+If the scenario's own child replaces the workspace directory *before* an
+`expect_snapshot` resolves — deleting and recreating the directory under the same
+name, or repointing a symlinked workspace to a directory **outside** the captured
+one — the snapshot is now **refused** instead of being written to the
+replacement. `1.2.2` re-resolved the workspace name at assertion time and wrote
+into whatever directory then sat there, including one the child had just created.
+
+The refusal is a Scenario error (**exit 2**) when the workspace name still
+resolves but denotes a different directory, and when it no longer resolves at
+all. It is a Process error (**exit 3**) in the narrower case where pitty cannot
+re-read the held descriptor's own identity. Both are refusals that write nothing;
+a pipeline distinguishing "the run was refused" from "an assertion failed" should
+therefore test for non-zero-and-not-1 rather than for exit 2 alone.
+
+Snapshots are now resolved against the directory captured before the scenario
+started, identified by `(dev, ino)` from the held descriptor rather than by its
+path, so a directory that merely reuses the name is not accepted.
+
+The break is narrower than "a repointed symlink is refused", and the exclusion is
+worth stating exactly, because it is the case most likely to be assumed covered.
+The identity is held on the workspace's **canonical** path — the alias is
+resolved away before the descriptor is opened — so a repoint whose new
+destination lands *inside* the captured canonical root is **not** refused.
+Repointing `w -> real` to `w -> real/subdir` leaves `real` unchanged and
+`real/subdir/out.snap` inside the captured root, so the snapshot is written to
+the replacement. Measured: `1.2.2` exits 0 and this build exits 0, both using the
+replacement — identical behaviour, and therefore no break at all in that case.
+
+Beyond that, this entry affects only runs where the workspace is actually
+replaced and the replacement lands before the assertion. A workspace reached
+through an ordinary symlink that is never repointed, one whose *contents* change,
+and platform aliases such as macOS's `/tmp` → `/private/tmp` are all unaffected
+by *this break* and behave as in `1.2.2`. (That is a statement about this entry,
+not a blanket equivalence: a scenario whose child races the resolver can still
+differ from `1.2.2`, per the paragraph below.)
+
+The refusal is also not a defence against a child that is *racing* the
+resolver rather than replacing the workspace outright; see
+[`SECURITY.md`](SECURITY.md)'s *Residual: the path-mutation race* for the limit.
+Under those two windows the verdict **can** differ from `1.2.2` — in both known
+cases this build passes an assertion `1.2.2` failed — so it is a divergence as
+well as a security caveat. It is recorded there rather than as an accepted break
+above because no ordinary scenario reaches it: it requires a program mutating its
+own workspace concurrently with an assertion.
+
+Relatedly, a `file:` whose `..` detour *names* a directory outside the workspace
+no longer creates that directory. `1.2.2` called `create_dir_all` on the raw
+path, so `../outside/new/../../w/out.snap` materialised `outside/new` outside the
+workspace as a side effect before writing the snapshot inside it. The snapshot
+still records; only the escape is gone.
+
 ## 2. Report output JSON (a separate contract)
 
 The machine-readable JSON emitted by `pitty run` (`Report`),
