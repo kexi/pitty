@@ -54,6 +54,11 @@ inputs:
       `uses: kexi/pitty@...`, so `@v1`, `@v1.2`, and `@v1.2.0` look for matching
       release assets. Set this only to intentionally install a different pitty
       ref than the action ref.
+
+      Setting this is authoritative: the pinned ref is installed and takes
+      precedence even when a `pitty` binary is already on PATH. Leaving it
+      empty lets a pre-installed `pitty` (self-hosted runner image, earlier
+      step) be reused as-is, without downloading anything.
     required: false
     default: ""
 
@@ -85,11 +90,6 @@ runs:
       run: |
         set -euo pipefail
 
-        if command -v pitty >/dev/null 2>&1; then
-          echo "pitty already on PATH: $(command -v pitty)"
-          exit 0
-        fi
-
         input_ref="${PITTY_INPUT_REF:-}"
         action_ref="${PITTY_ACTION_REF:-}"
         if [ -n "$input_ref" ]; then
@@ -100,6 +100,23 @@ runs:
           # Local actions (`uses: ./`) have no action ref; keep the historical
           # stable fallback instead of trying to download `pitty--...`.
           PITTY_REF="v1"
+        fi
+
+        # Reuse a pitty that is already on PATH, but ONLY when the caller did not
+        # pin a version. An explicit `version:` is a reproducibility request:
+        # honoring a pre-existing binary instead would hand the caller a ref they
+        # did not choose, silently, and skip the checksum-verified download along
+        # with it. Why not drop the reuse branch entirely: self-hosted runner
+        # images and jobs that installed pitty in an earlier step legitimately
+        # pre-provision the binary, and for them PITTY_REF is only a default, not
+        # a request. Note this runs AFTER ref resolution so the pinned path can
+        # be taken; the ordering is load-bearing.
+        if [ -z "$input_ref" ] && command -v pitty >/dev/null 2>&1; then
+          echo "pitty already on PATH: $(command -v pitty) (no version pinned; reusing it)"
+          exit 0
+        fi
+        if [ -n "$input_ref" ] && command -v pitty >/dev/null 2>&1; then
+          echo "::notice::pitty is already on PATH at $(command -v pitty), but version: ${input_ref} was pinned; installing ${input_ref} to honor the pin"
         fi
 
         os="${RUNNER_OS:?RUNNER_OS is not set}"
@@ -119,7 +136,9 @@ runs:
         checksum_path="${archive_path}.sha256"
         # GITHUB_PATH is consumed by the runner outside this Git Bash process on
         # Windows, so write Windows-native paths there even though the installer
-        # itself uses Bash paths.
+        # itself uses Bash paths. The runner PREPENDS each entry to PATH, which
+        # is what lets a pinned install shadow a pitty that was already on PATH
+        # (see the reuse branch above) rather than losing to it.
         append_github_path() {
           local dir="$1"
           local path_entry="$dir"

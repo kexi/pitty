@@ -5,8 +5,19 @@
 //!
 //! - a **step summary**: Markdown appended to the file named by
 //!   `$GITHUB_STEP_SUMMARY`, shown on the workflow run page;
-//! - **annotations**: `::error`/`::warning` workflow commands printed to stdout
+//! - **annotations**: `::error`/`::warning` workflow commands printed to stderr
 //!   that surface inline on the run and in the PR diff.
+//!
+//! Why annotations go to stderr and not stdout: stdout is pitty's
+//! machine-readable channel — `run` always prints a JSON report there, and
+//! `matrix`/`bench` do under `--json`. Annotations auto-enable on a runner
+//! (`GITHUB_ACTIONS=true`), so emitting them to stdout appends non-JSON lines
+//! after the document and a consumer piping to `jq` fails on exactly the runs
+//! that produced a failure. The runner parses workflow commands off both
+//! streams — `OutputManager.OnDataReceived` is wired to `ErrorDataReceived` as
+//! well as `OutputDataReceived` in actions/runner, with no stream-specific
+//! branch around the `::` command scan — so stderr keeps the inline PR
+//! annotations while leaving stdout a single parseable value.
 //!
 //! Both are *side effects only*: the process exit code (0/1/2/3) is the verdict
 //! and is never changed by anything here, and a failure to write the summary is
@@ -55,7 +66,7 @@ fn is_github_actions() -> bool {
 pub fn write_step_summary(markdown: &str, secrets: &[String]) {
     let Ok(path) = std::env::var(STEP_SUMMARY_ENV) else {
         // Not an error: `--github` may be forced on locally where no runner set
-        // the summary path. The annotations still print to stdout.
+        // the summary path. The annotations still print to stderr.
         return;
     };
     let masked = mask_secrets(markdown, secrets);
@@ -78,9 +89,10 @@ fn append_to_file(path: &str, contents: &str) -> std::io::Result<()> {
 ///
 /// Both `title` and `message` are secret-masked, then escaped for the workflow
 /// command grammar (see [`escape_property`]/[`escape_data`]). The annotation is
-/// written to stdout, where the runner parses `::` command lines.
+/// written to stderr, which the runner scans for `::` command lines just like
+/// stdout — see the module docs for why stdout is off limits here.
 pub fn emit_error_annotation(title: &str, message: &str, secrets: &[String]) {
-    println!("{}", format_error_annotation(title, message, secrets));
+    eprintln!("{}", format_error_annotation(title, message, secrets));
 }
 
 /// Build the `::error` command line for a failed assertion.
@@ -97,8 +109,11 @@ fn format_error_annotation(title: &str, message: &str, secrets: &[String]) -> St
 }
 
 /// Print a GitHub Actions warning annotation (used for flaky bench results).
+///
+/// Written to stderr for the same reason as [`emit_error_annotation`]: `bench
+/// --json` owns stdout.
 pub fn emit_warning_annotation(message: &str, secrets: &[String]) {
-    println!("{}", format_warning_annotation(message, secrets));
+    eprintln!("{}", format_warning_annotation(message, secrets));
 }
 
 /// Build the `::warning` command line. Split out for the same testability
