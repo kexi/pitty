@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer};
 
 use super::duration::DurationStr;
 use crate::assert::json::JsonCheck;
+use crate::pty::SplitMode;
 
 /// Every step key the deserializer's dispatch accepts, in declaration order.
 ///
@@ -210,17 +211,25 @@ impl Step {
 /// Specification of a process to spawn.
 ///
 /// Accepts either a bare command string (`spawn: bash`) or a struct
-/// (`spawn: {command: ..., cwd: ..., env: {...}}`).
+/// (`spawn: {command: ..., cwd: ..., env: {...}, split: ...}`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(from = "SpawnSpecRaw")]
 pub struct SpawnSpec {
-    /// The command line. The first whitespace-separated token is the program;
-    /// the rest are arguments.
+    /// The command line, tokenized per [`SpawnSpec::split`].
     pub command: String,
     /// Optional working directory override (relative to the workspace cwd).
     pub cwd: Option<String>,
     /// Optional extra environment variables for this spawn.
     pub env: std::collections::BTreeMap<String, String>,
+    /// How `command` is split into `[program, args...]`.
+    ///
+    /// Defaults to [`SplitMode::Whitespace`], the rule pitty has always used,
+    /// because `COMPATIBILITY.md` forbids changing the meaning of an existing
+    /// field within `1.x`. `split: posix` opts a single `spawn` into POSIX
+    /// shell word rules; it is only expressible in the struct form (the bare
+    /// string form has nowhere to put a modifier that is not itself a change
+    /// to how existing command strings are read).
+    pub split: SplitMode,
 }
 
 /// Untagged wire form for [`SpawnSpec`]: a string or a struct.
@@ -238,18 +247,34 @@ enum SpawnSpecRaw {
         cwd: Option<String>,
         #[serde(default)]
         env: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        split: SplitMode,
     },
 }
 
 impl From<SpawnSpecRaw> for SpawnSpec {
     fn from(raw: SpawnSpecRaw) -> Self {
         match raw {
+            // The bare string form cannot carry `split`, so it is always the
+            // legacy default — which is exactly what a scenario written before
+            // the field existed must keep getting.
             SpawnSpecRaw::Command(command) => SpawnSpec {
                 command,
                 cwd: None,
                 env: Default::default(),
+                split: SplitMode::default(),
             },
-            SpawnSpecRaw::Struct { command, cwd, env } => SpawnSpec { command, cwd, env },
+            SpawnSpecRaw::Struct {
+                command,
+                cwd,
+                env,
+                split,
+            } => SpawnSpec {
+                command,
+                cwd,
+                env,
+                split,
+            },
         }
     }
 }
@@ -484,8 +509,17 @@ impl ExpectJsonSpec {
 #[derive(Debug, Clone, Deserialize)]
 struct ExpectJsonRaw {
     path: String,
-    #[serde(default)]
-    equals: Option<serde_json::Value>,
+    // Double `Option` so an explicitly written `equals: null` is distinguishable
+    // from an omitted `equals`: the outer layer records *presence*, the inner
+    // holds the value (`Some(Value::Null)` for an explicit null). Why not a plain
+    // `Option<Value>`: serde collapses a YAML `null`/`~`/empty scalar into the
+    // outer `Option`, so `equals: null` deserialized to `None` — identical to
+    // omission — which made null unassertable and let the one-of guard miscount a
+    // written check as absent. Why not `#[serde(default)]` alone on the inner
+    // type: `Value` has no "absent" state to default to, so presence has to live
+    // in a wrapper the deserializer only fills when the key appears.
+    #[serde(default, deserialize_with = "some_value")]
+    equals: Option<Option<serde_json::Value>>,
     #[serde(default)]
     contains: Option<String>,
     #[serde(default)]
@@ -494,6 +528,21 @@ struct ExpectJsonRaw {
     source: Source,
     #[serde(default)]
     timeout: Option<DurationStr>,
+}
+
+/// Deserialize a present `equals` value into `Some(..)`, mapping an explicit
+/// JSON/YAML null to `Some(Value::Null)` rather than to absence.
+///
+/// Paired with `#[serde(default)]`, which supplies `None` only when the key is
+/// missing entirely: serde calls this function exactly when the key *is* present,
+/// so wrapping unconditionally in `Some` is what separates "written" from
+/// "omitted". `Value`'s own `Deserialize` already yields `Value::Null` for a null
+/// scalar, so no null special-case is needed here.
+fn some_value<'de, D>(deserializer: D) -> Result<Option<Option<serde_json::Value>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(|value| Some(Some(value)))
 }
 
 impl From<ExpectJsonRaw> for ExpectJsonSpec {
@@ -505,6 +554,9 @@ impl From<ExpectJsonRaw> for ExpectJsonSpec {
         // `invalid_reason` and let the runner emit a precise Scenario error.
         // `exists: false` counts as present (so it cannot pair with another
         // check) but does not select a check, hence resolves to invalid below.
+        // An explicit `equals: null` is `Some(Some(Value::Null))`, so it counts as
+        // present here exactly like any other written check — the same
+        // "present but falsy" handling `exists: false` already gets.
         let present = [
             raw.equals.is_some(),
             raw.contains.is_some(),
@@ -514,8 +566,45 @@ impl From<ExpectJsonRaw> for ExpectJsonSpec {
         .filter(|p| **p)
         .count();
 
-        let (check, invalid_reason) = match (present, raw.equals, raw.contains, raw.exists) {
-            (1, Some(v), _, _) => (JsonCheck::Equals(v), None),
+        // COMPATIBILITY: `equals: null` paired with exactly one other check.
+        //
+        // 1.2.2 dropped `equals: null` while deserializing, so these documents
+        // parsed as having a single check and *ran* — `equals: null` + `contains`
+        // executed the `contains`, and `equals: null` + `exists` executed the
+        // `exists`. Issue #30 made `equals: null` assertable, which correctly
+        // turned it into a present check; but that also made these two shapes
+        // trip the one-of guard, turning a scenario 1.2.2 executed (exit 0/1)
+        // into a Scenario error (exit 2).
+        //
+        // COMPATIBILITY.md forbids tightening validation so a previously valid
+        // scenario becomes an error, and lists no exception for "the old
+        // behaviour verified nothing". Whether anyone *should* have depended on
+        // it is not the contract's criterion — execution is, and a pipeline can
+        // route on the exit code without depending on the assertion's meaning.
+        //
+        // So these two shapes keep 1.2.2's behaviour: the null `equals` is
+        // dropped and the other check runs. Everything else is untouched —
+        // `equals: null` alone still asserts null (#30's actual fix, a pure
+        // loosening), and every combination 1.2.2 *rejected* is still rejected,
+        // including `equals: null` with both `contains` and `exists`.
+        let null_equals_with_one_other =
+            matches!(raw.equals, Some(None) | Some(Some(serde_json::Value::Null)))
+                && [raw.contains.is_some(), raw.exists.is_some()]
+                    .iter()
+                    .filter(|p| **p)
+                    .count()
+                    == 1;
+        let (present, raw_equals) = if null_equals_with_one_other {
+            (present - 1, None)
+        } else {
+            (present, raw.equals)
+        };
+
+        let (check, invalid_reason) = match (present, raw_equals, raw.contains, raw.exists) {
+            (1, Some(v), _, _) => (
+                JsonCheck::Equals(v.unwrap_or(serde_json::Value::Null)),
+                None,
+            ),
             (1, _, Some(s), _) => (JsonCheck::Contains(s), None),
             (1, _, _, Some(true)) => (JsonCheck::Exists, None),
             (1, _, _, Some(false)) => (
@@ -657,8 +746,83 @@ mod tests {
                 assert_eq!(spec.command, "bash");
                 assert!(spec.cwd.is_none());
                 assert!(spec.env.is_empty());
+                // The bare form has nowhere to carry `split`, so it is always
+                // the legacy whitespace rule the v1 contract pins as default.
+                assert_eq!(spec.split, SplitMode::Whitespace);
             }
             other => panic!("expected Spawn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_struct_without_split_defaults_to_the_legacy_whitespace_rule() {
+        // A scenario written before `split` existed must keep the tokenization
+        // it was authored against; the field defaults rather than flipping it.
+        let s = step("spawn:\n  command: echo 'hello world'");
+        match s {
+            Step::Spawn(spec) => assert_eq!(spec.split, SplitMode::Whitespace),
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_struct_opts_in_to_posix_tokenization() {
+        // `split: posix` is the whole opt-in surface, normalized like `key`.
+        for yaml in [
+            "spawn:\n  command: echo hi\n  split: posix",
+            "spawn:\n  command: echo hi\n  split: \"  POSIX  \"",
+        ] {
+            match step(yaml) {
+                Step::Spawn(spec) => assert_eq!(spec.split, SplitMode::Posix, "{yaml}"),
+                other => panic!("expected Spawn, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_accepts_an_unknown_split_keyword_the_way_older_pitty_does() {
+        // The v1 contract, verified against the 1.2.2 binary: `split` postdates
+        // 1.0, so `split: custom` parses and runs on every earlier 1.x (the
+        // field is simply ignored — nested deny_unknown_fields is off). This
+        // pitty may not be stricter, so the keyword is carried as `Unknown`,
+        // tokenizes as the default, and warns rather than erroring.
+        let s = step("spawn:\n  command: echo hi\n  split: custom");
+        match s {
+            Step::Spawn(spec) => {
+                assert_eq!(spec.split, SplitMode::Unknown("\"custom\"".to_string()));
+                assert!(spec.split.warning().is_some(), "a typo must stay visible");
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_accepts_a_non_string_split_value_the_way_older_pitty_does() {
+        // The same clause one type away, and the case that matters most for the
+        // untagged `SpawnSpecRaw`: a type mismatch at `split` fails the whole
+        // variant match, so requiring a string would reject the entire `spawn`
+        // map — with a message that never mentions `split`. 1.2.2 ignores the
+        // key whatever its type (verified against the binary), so this build
+        // must accept it and fall back to the default.
+        for yaml in [
+            "spawn:\n  command: echo hi\n  split: 42",
+            "spawn:\n  command: echo hi\n  split: true",
+            "spawn:\n  command: echo hi\n  split: null",
+            "spawn:\n  command: echo hi\n  split: [a, b]",
+            "spawn:\n  command: echo hi\n  split: {mode: posix}",
+        ] {
+            match step(yaml) {
+                Step::Spawn(spec) => {
+                    assert!(
+                        matches!(spec.split, SplitMode::Unknown(_)),
+                        "{yaml} must parse to an unknown split mode, got {:?}",
+                        spec.split
+                    );
+                    assert_eq!(spec.command, "echo hi", "the rest of the map must survive");
+                    assert!(spec.split.warning().is_some(), "{yaml} must warn");
+                }
+                other => panic!("expected Spawn for {yaml}, got {other:?}"),
+            }
         }
     }
 
@@ -998,6 +1162,84 @@ mod tests {
     }
 
     #[test]
+    fn null_equals_paired_with_one_other_check_stays_executable() {
+        // COMPATIBILITY (v1): 1.2.2 dropped `equals: null` while deserializing,
+        // so these two shapes parsed as a single check and *ran* — verified
+        // against the 1.2.2 binary, which exits 1 for the `contains` pair and 0
+        // for the `exists` pair. Issue #30 made `equals: null` a real check,
+        // which turned both into Scenario errors (exit 2).
+        //
+        // COMPATIBILITY.md forbids tightening validation so a previously valid
+        // scenario becomes an error, and lists no exception for "the old
+        // behaviour verified nothing". So the null `equals` is dropped for these
+        // shapes and the other check runs, exactly as 1.2.2 did.
+        let contains_pair = "expect_json:\n  path: x\n  equals: null\n  contains: b";
+        match step(contains_pair) {
+            Step::ExpectJson(spec) => {
+                assert!(
+                    spec.invalid_reason.is_none(),
+                    "1.2.2 executed this shape, so it must not be rejected"
+                );
+                assert!(
+                    matches!(&spec.check, JsonCheck::Contains(v) if v == "b"),
+                    "the contains check must run, got {:?}",
+                    spec.check
+                );
+            }
+            other => panic!("expected ExpectJson, got {other:?}"),
+        }
+
+        let exists_pair = "expect_json:\n  path: x\n  equals: null\n  exists: true";
+        match step(exists_pair) {
+            Step::ExpectJson(spec) => {
+                assert!(
+                    spec.invalid_reason.is_none(),
+                    "1.2.2 executed this shape, so it must not be rejected"
+                );
+                assert!(
+                    matches!(spec.check, JsonCheck::Exists),
+                    "the exists check must run, got {:?}",
+                    spec.check
+                );
+            }
+            other => panic!("expected ExpectJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn null_equals_alone_still_asserts_null() {
+        // Issue #30's actual fix, and a pure loosening: 1.2.2 rejected this
+        // (exit 2), so making it assertable breaks nobody.
+        match step("expect_json:\n  path: x\n  equals: null") {
+            Step::ExpectJson(spec) => {
+                assert!(spec.invalid_reason.is_none());
+                assert!(
+                    matches!(&spec.check, JsonCheck::Equals(v) if v.is_null()),
+                    "got {:?}",
+                    spec.check
+                );
+            }
+            other => panic!("expected ExpectJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn null_equals_with_two_other_checks_is_still_rejected() {
+        // The guard may reject whatever 1.2.2 also rejected. 1.2.2 exits 2 here
+        // (two checks remain after dropping the null), so this stays an error —
+        // the compatibility carve-out is scoped to what actually executed.
+        match step("expect_json:\n  path: x\n  equals: null\n  contains: b\n  exists: true") {
+            Step::ExpectJson(spec) => {
+                assert!(
+                    spec.invalid_reason.is_some(),
+                    "1.2.2 rejected this too, so it must stay rejected"
+                );
+            }
+            other => panic!("expected ExpectJson, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn expect_json_no_check_sets_invalid_reason() {
         // A path with no check at all is also an authoring error -> invalid_reason.
         let s = step("expect_json:\n  path: x");
@@ -1014,6 +1256,89 @@ mod tests {
         let s = step("expect_json:\n  path: x\n  equals: 1");
         match s {
             Step::ExpectJson(spec) => assert!(spec.invalid_reason.is_none()),
+            other => panic!("expected ExpectJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expect_json_explicit_null_equals_is_an_assertable_check() {
+        // (#30) Guarantee: `equals: null` is a real check. It must select
+        // Equals(Value::Null) — so a null leaf can be asserted, as the README
+        // promises — and must NOT be mistaken for an omitted `equals` (which
+        // would resolve to the "no check given" one-of violation).
+        for yaml in [
+            "expect_json:\n  path: result.error\n  equals: null",
+            "expect_json:\n  path: result.error\n  equals: ~",
+        ] {
+            match step(yaml) {
+                Step::ExpectJson(spec) => {
+                    assert!(
+                        spec.invalid_reason.is_none(),
+                        "explicit null must not read as a missing check: {yaml}"
+                    );
+                    assert!(
+                        matches!(spec.check, JsonCheck::Equals(serde_json::Value::Null)),
+                        "expected Equals(Null) for {yaml}, got {:?}",
+                        spec.check
+                    );
+                }
+                other => panic!("expected ExpectJson, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn expect_json_explicit_null_equals_is_kept_executable_for_v1() {
+        // HISTORY, because this test reversed.
+        //
+        // #30 found that `equals: null` was discarded while deserializing, so
+        // pairing it with another check silently ran the *other* check and threw
+        // the author's null assertion away — a false-green vector. This test
+        // originally asserted that both pairings became "multiple checks"
+        // Scenario errors.
+        //
+        // Round 15 found the cost: 1.2.2 *executed* both shapes (verified against
+        // the 1.2.2 binary — exit 1 for the `contains` pair, exit 0 for the
+        // `exists` pair), and COMPATIBILITY.md forbids tightening validation so a
+        // previously valid scenario becomes an error. It lists no exception for
+        // "the old behaviour verified nothing", and whether anyone *should* have
+        // relied on it is not the criterion — execution is, and a pipeline can
+        // route on exit 1 versus exit 2 without depending on the assertion's
+        // meaning.
+        //
+        // So these two shapes keep 1.2.2's behaviour until 2.0. #30's real fix
+        // survives intact and is covered by `null_equals_alone_still_asserts_null`:
+        // `equals: null` on its own now asserts null, which 1.2.2 rejected, so it
+        // is a pure loosening.
+        for yaml in [
+            "expect_json:\n  path: a\n  equals: null\n  contains: hi",
+            "expect_json:\n  path: a\n  equals: null\n  exists: true",
+        ] {
+            match step(yaml) {
+                Step::ExpectJson(spec) => {
+                    assert!(
+                        spec.invalid_reason.is_none(),
+                        "1.2.2 executed {yaml}, so v1 must keep executing it"
+                    );
+                }
+                other => panic!("expected ExpectJson, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn expect_json_omitted_equals_still_reads_as_no_check() {
+        // (#30) Guarantee: making an explicit null "present" must not make an
+        // *omitted* `equals` present too. A bare path keeps resolving to the
+        // "no check given" violation, so the two cases stay distinguishable.
+        match step("expect_json:\n  path: a") {
+            Step::ExpectJson(spec) => {
+                let reason = spec.invalid_reason.expect("expected a one-of violation");
+                assert!(
+                    reason.contains("no check given"),
+                    "expected a no-check reason, got {reason:?}"
+                );
+            }
             other => panic!("expected ExpectJson, got {other:?}"),
         }
     }

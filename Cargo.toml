@@ -29,6 +29,14 @@ tempfile = "3"
 # similar is MIT OR Apache-2.0; its MIT option is compatible with this crate's
 # MIT license.
 similar = "2"
+# POSIX shell word splitting for the string form of `spawn` (src/pty/mod.rs).
+# Why a crate rather than a hand-rolled splitter: quoting has more corner cases
+# than it looks (single vs double quotes, backslash escapes inside and outside
+# quotes, line continuations, unmatched-quote detection), and getting one wrong
+# silently mis-execs the process under test. shell-words is the long-established
+# implementation of exactly this rule and is MIT OR Apache-2.0, whose MIT option
+# is compatible with this crate's MIT license.
+shell-words = "1"
 
 # Job objects for killing the whole process tree under a ConPTY session on
 # teardown. winapi is already in the graph through portable-pty, so this adds
@@ -42,3 +50,13 @@ winapi = { version = "0.3", features = ["handleapi", "jobapi2", "winnt"] }
 libc = "0.2"
 
 [dev-dependencies]
+# draft-07 validator for the schema contract gate (tests/schema_contract.rs). It
+# validates real documents against the shipped schema so constraint drift — not
+# just key-set drift — fails the build. default-features off: the default set
+# pulls reqwest/rustls for remote $ref resolution, and this schema has only
+# local refs.
+jsonschema = { version = "0.55.1", default-features = false }
+# The same YAML parser the config layer uses, so the contract gate converts a
+# scenario to JSON through the exact reader pitty parses with (an integration
+# test sees only the public API plus dev-dependencies, hence the restatement).
+serde_norway = "0.9"
