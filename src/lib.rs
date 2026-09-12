@@ -25,6 +25,8 @@ pub mod matrix;
 pub mod pty;
 pub mod report;
 pub mod runner;
+/// Symlink-resistant, descriptor-anchored filesystem traversal (Unix).
+pub mod safepath;
 pub mod workspace;
 
 pub use config::Scenario;
