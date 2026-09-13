@@ -2345,10 +2345,37 @@ steps:
 /// change.
 ///
 /// The assertion is on a scenario whose child has *already exited* before the
-/// run ends. Its own work is a couple of milliseconds, so the only thing that can
-/// inflate the number is teardown: measured at ~65ms with teardown counted and
-/// ~8ms without. The bound sits well above the honest value and far below the
-/// regression, so it survives a loaded machine without going blind to the bug.
+/// run ends, so the scenario's own work is trivially small and teardown is the
+/// only thing that can inflate the number.
+///
+/// The claim is deliberately *relative*, not an absolute millisecond budget.
+/// Each run is wrapped in an independently measured wall-clock spanning the
+/// whole child process — startup, the scenario, teardown, exit — and the
+/// comparison is between the two halves of that total: the part `duration_ms`
+/// claims, and the part left over outside it.
+///
+/// Why not a fixed bound. The previous `best < 40` failed on CI, and widening it
+/// would have been the wrong fix: the honest value under this harness is really
+/// ~38-44ms (the `~8ms` in the old comment was measured under different
+/// conditions, so the threshold was calibrated against a number this test never
+/// produces and sat directly on the honest value). Any absolute budget also has
+/// to survive a loaded shared runner adding tens of milliseconds of scheduling
+/// noise to a small measurement, which no single millisecond number does.
+///
+/// What separates the hypotheses regardless of machine speed is *where the
+/// teardown cost lands*. Teardown is a fixed grace period of roughly 55ms; it is
+/// inside the measured total either way, so the leftover `total - duration_ms`
+/// is large when `duration_ms` honestly excludes teardown and collapses when it
+/// does not. Measured here across repeated runs:
+///
+/// | | `duration_ms` | `total - duration_ms` |
+/// |---|---|---|
+/// | honest | 37-44ms | ~93ms |
+/// | teardown counted | 89-98ms | ~38ms |
+///
+/// So the test asserts the leftover exceeds what `duration_ms` claims. A slower
+/// machine stretches both sides together, which is what makes the comparison
+/// hold where an absolute bound did not.
 #[test]
 #[ignore = "requires a usable PTY"]
 fn duration_ms_excludes_session_teardown() {
@@ -2371,25 +2398,61 @@ steps:
     )
     .unwrap();
 
-    // Best of several runs: the floor is what carries the signal, and a single
-    // sample on a busy machine can be arbitrarily high for unrelated reasons.
-    let best = (0..5)
+    // Each sample pairs the reported `duration_ms` with the wall-clock of the
+    // entire child process, measured out here where teardown cannot be excluded
+    // from it. That independent total is the yardstick the comparison below is
+    // made against.
+    let samples: Vec<(u64, u128)> = (0..5)
         .map(|_| {
+            let started = std::time::Instant::now();
             let out = std::process::Command::new(env!("CARGO_BIN_EXE_pitty"))
                 .args(["run", scenario.to_str().unwrap()])
                 .env_remove("GITHUB_ACTIONS")
                 .output()
                 .expect("pitty binary must launch");
+            // Includes startup, the scenario, teardown and exit — a strict
+            // superset of whatever `duration_ms` measures.
+            let total_ms = started.elapsed().as_millis().max(1);
             let stdout = String::from_utf8_lossy(&out.stdout);
             let report: serde_json::Value =
                 serde_json::from_str(&stdout).expect("stdout must be a JSON report");
-            report["duration_ms"].as_u64().expect("duration_ms")
+            let duration_ms = report["duration_ms"].as_u64().expect("duration_ms");
+            (duration_ms, total_ms)
         })
-        .min()
-        .expect("at least one run");
+        .collect();
 
+    // For each sample, how much more time fell *outside* `duration_ms` than
+    // inside it. Positive means the bulk of the run — teardown included — is not
+    // being charged to the scenario, which is the property under test.
+    let mut margins: Vec<i128> = samples
+        .iter()
+        .map(|&(duration_ms, total_ms)| {
+            let outside_duration = total_ms.saturating_sub(u128::from(duration_ms));
+            outside_duration as i128 - i128::from(duration_ms)
+        })
+        .collect();
+
+    // The MEDIAN, deliberately: neither the best nor the worst sample.
+    //
+    // Not the best — the first run pays the OS's cold-start cost for the binary,
+    // which lands entirely outside `duration_ms` and inflates that one sample's
+    // margin by hundreds of milliseconds. Taking the maximum would let that
+    // outlier alone satisfy the assertion and hide a real regression (it did,
+    // while this test was being written). Not the worst either, since a single
+    // descheduled run is exactly the CI noise this test must tolerate. The
+    // median needs most of the samples to agree, which no one-off spike can buy.
+    margins.sort_unstable();
+    let median_margin = margins[margins.len() / 2];
+
+    // Honest runs clear this by roughly +50ms; a run that counts teardown sits
+    // around -55ms. Requiring merely `> 0` puts the line in the middle of that
+    // ~100ms gap, so neither a slow machine nor a fast one can cross it by
+    // accident.
     assert!(
-        best < 40,
-        "duration_ms must exclude teardown (~8ms honest, ~65ms with teardown counted), got {best}ms"
+        median_margin > 0,
+        "duration_ms must exclude teardown, but across repeated runs it claimed more of \
+         each run than was left outside it (median margin {median_margin}ms; honest is \
+         about +50ms, teardown-counted about -55ms). Teardown is a fixed ~55ms cost that \
+         belongs outside `duration_ms`. Samples (duration_ms, total_ms): {samples:?}"
     );
 }

@@ -137,6 +137,44 @@ fn install_step_script() -> String {
     body
 }
 
+/// The directories the installer's own utilities are found in, taken from the
+/// ambient `PATH` rather than assumed.
+///
+/// Why not the historical `/usr/bin:/bin`: inside the nix build sandbox neither
+/// directory exists — every tool lives under `/nix/store/...` — so a hardcoded
+/// list left the child with a `PATH` on which nothing resolved. Reading the
+/// ambient `PATH` works in both worlds without naming a store path: on a normal
+/// machine it yields `/usr/bin` and `/bin` anyway, and in the sandbox it yields
+/// the store `bin` directories stdenv put there.
+///
+/// Entries are filtered to those that exist, and the relative/empty entries a
+/// shell treats as "the current directory" are dropped: the fixture depends on
+/// its own `bin` winning the `command -v pitty` lookup, and a `.` entry could
+/// let an unrelated file in the test's cwd shadow it.
+#[cfg(unix)]
+fn ambient_path_dirs() -> Vec<std::path::PathBuf> {
+    let Some(path) = std::env::var_os("PATH") else {
+        return Vec::new();
+    };
+    std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute() && dir.is_dir())
+        .collect()
+}
+
+/// Locate an executable by scanning the ambient `PATH`, the way a shell would.
+///
+/// `Command::new("bash")` already resolves against the inherited `PATH`, but
+/// resolving it ourselves lets the test report a precise skip reason when the
+/// tool is genuinely absent instead of failing on an opaque `NotFound` from the
+/// spawn.
+#[cfg(unix)]
+fn find_on_ambient_path(name: &str) -> Option<std::path::PathBuf> {
+    ambient_path_dirs()
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 /// Run the real installer body with a fake `pitty` already on PATH, returning
 /// its combined output.
 ///
@@ -145,8 +183,12 @@ fn install_step_script() -> String {
 /// script reaches its reuse-or-install decision and then stops. What the caller
 /// reads back is which branch it took: the reuse message, or the download
 /// attempt that proves the pin was honored.
+///
+/// Returns `None` only when no `bash` exists anywhere on the ambient `PATH`, so
+/// the body simply cannot be executed; callers skip with a printed reason rather
+/// than reporting a failure they cannot act on.
 #[cfg(unix)]
-fn run_installer_with_pitty_on_path(input_ref: &str) -> String {
+fn run_installer_with_pitty_on_path(input_ref: &str) -> Option<String> {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
@@ -172,9 +214,20 @@ fn run_installer_with_pitty_on_path(input_ref: &str) -> String {
     let script = dir.path().join("install.sh");
     std::fs::write(&script, install_step_script()).unwrap();
 
-    let out = std::process::Command::new("bash")
+    let bash = find_on_ambient_path("bash")?;
+
+    // The fixture `bin` stays FIRST: the property under test is that the script
+    // sees a `pitty` (and the `curl`/`git`/`cargo` stubs) ahead of anything real
+    // on the machine, so prepending it is what makes the test mean anything. The
+    // ambient directories follow so the script's own utilities (`mkdir`, `grep`,
+    // `awk`, ...) still resolve wherever they happen to live.
+    let mut child_path = vec![bin.clone()];
+    child_path.extend(ambient_path_dirs());
+    let child_path = std::env::join_paths(child_path).expect("PATH entries must not contain ':'");
+
+    let out = std::process::Command::new(&bash)
         .arg(&script)
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("PATH", &child_path)
         .env("PITTY_INPUT_REF", input_ref)
         .env("PITTY_ACTION_REF", "v1")
         .env("PITTY_REPO", "https://github.com/kexi/pitty")
@@ -183,12 +236,35 @@ fn run_installer_with_pitty_on_path(input_ref: &str) -> String {
         .env("RUNNER_TEMP", dir.path())
         .env("GITHUB_PATH", dir.path().join("github_path"))
         .output()
-        .expect("bash must be available to run the installer body");
-    format!(
+        .expect("the bash located on PATH must be spawnable");
+    Some(format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    )
+    ))
+}
+
+/// Skip-with-reason wrapper: `None` means the environment has no `bash` at all.
+///
+/// A macro rather than a function so the `return` lands in the calling test's
+/// body. Skipping is the last resort and should never trigger in CI: both the
+/// GitHub runners and the nix build sandbox provide bash. It exists so an
+/// exotic environment reports *why* it could not check the contract instead of
+/// failing on an opaque spawn error, as the hardcoded `/usr/bin:/bin` PATH did.
+#[cfg(unix)]
+macro_rules! installer_output_or_skip {
+    ($input_ref:expr) => {
+        match run_installer_with_pitty_on_path($input_ref) {
+            Some(output) => output,
+            None => {
+                println!(
+                    "SKIP {}: no `bash` found on PATH, so the installer body cannot be executed",
+                    concat!(module_path!(), "::", line!())
+                );
+                return;
+            }
+        }
+    };
 }
 
 /// (#42) An explicit `version:` pin is authoritative. What is guaranteed: with a
@@ -200,7 +276,7 @@ fn run_installer_with_pitty_on_path(input_ref: &str) -> String {
 #[cfg(unix)]
 #[test]
 fn an_explicit_version_pin_overrides_a_pitty_already_on_path() {
-    let output = run_installer_with_pitty_on_path("v1.2.0");
+    let output = installer_output_or_skip!("v1.2.0");
     assert!(
         !output.contains("reusing it"),
         "a pinned version must not be satisfied by a pre-existing binary: {output:?}"
@@ -222,7 +298,7 @@ fn an_explicit_version_pin_overrides_a_pitty_already_on_path() {
 #[cfg(unix)]
 #[test]
 fn an_unpinned_run_reuses_a_pitty_already_on_path() {
-    let output = run_installer_with_pitty_on_path("");
+    let output = installer_output_or_skip!("");
     assert!(
         output.contains("already on PATH") && output.contains("reusing it"),
         "an unpinned run must reuse the binary already on PATH: {output:?}"
