@@ -3451,27 +3451,67 @@ steps: []
         // are not counting the same events. So resolvability is now the kernel's
         // answer about the whole path rather than a constant maintained here —
         // correct at whatever limit the running platform has.
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        std::fs::write(root.join("victim.snap"), "ORIGINAL").unwrap();
-        std::fs::create_dir(root.join("real")).unwrap();
+        //
+        // The chain length is likewise *not* a constant here. A fixed 31 links
+        // encoded macOS's limit (`MAXSYMLINKS` 32) as if it were universal: the
+        // same shape resolves fine on Linux, whose limit is 40, so the premise
+        // assertion below fired there and the test was wrong rather than merely
+        // failing. The length is therefore grown until the running kernel
+        // actually refuses, which is the only portable way to name "a chain this
+        // kernel will not resolve" — and it keeps the property under test intact
+        // on every platform, because what is asserted is still that pitty
+        // refuses whatever the kernel refused.
+        //
+        // Each length gets a fresh workspace so that chain length is the only
+        // variable, and the search is capped so a kernel with no limit at all
+        // skips rather than builds links forever.
+        const MAX_CHAIN: usize = 128;
 
-        // d0 -> d1 -> ... -> d30 -> real, a 31-hop directory chain.
-        let n = 30;
-        std::os::unix::fs::symlink("real", root.join(format!("d{n}"))).unwrap();
-        for i in (0..n).rev() {
-            std::os::unix::fs::symlink(format!("d{}", i + 1), root.join(format!("d{i}"))).unwrap();
+        // `out.snap -> d0/final` over an `n`-link directory chain, with
+        // `final -> ../victim.snap`. Returns the workspace root, or `None` when
+        // this kernel resolves the shape at that length.
+        fn build_unresolvable(dir: &std::path::Path, n: usize) -> Option<std::path::PathBuf> {
+            let root = dir.join(format!("n{n}"));
+            std::fs::create_dir(&root).unwrap();
+            let root = root.canonicalize().unwrap();
+            std::fs::write(root.join("victim.snap"), "ORIGINAL").unwrap();
+            std::fs::create_dir(root.join("real")).unwrap();
+
+            std::os::unix::fs::symlink("real", root.join(format!("d{n}"))).unwrap();
+            for i in (0..n).rev() {
+                std::os::unix::fs::symlink(format!("d{}", i + 1), root.join(format!("d{i}")))
+                    .unwrap();
+            }
+            std::os::unix::fs::symlink("../victim.snap", root.join("real/final")).unwrap();
+            std::os::unix::fs::symlink("d0/final", root.join("out.snap")).unwrap();
+
+            // The kernel's own answer about the whole path — the same question
+            // the resolver defers to, asked here to locate this platform's edge.
+            //
+            // Specifically ELOOP, not merely "some error": every component of
+            // this shape exists (the chain ends at a real `victim.snap`), so the
+            // only way it can fail is the symlink limit. Matching on the kind
+            // keeps a future edit from picking up an ENOENT boundary — a
+            // *dangling* chain — which pitty resolves by hand on purpose and
+            // which would therefore turn this into a test that cannot fail.
+            match std::fs::metadata(root.join("out.snap")) {
+                Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Some(root),
+                _ => None,
+            }
         }
-        std::os::unix::fs::symlink("../victim.snap", root.join("real/final")).unwrap();
-        std::os::unix::fs::symlink("d0/final", root.join("out.snap")).unwrap();
 
-        // Pin the premise: if the platform ever resolved this, the test would be
-        // asserting a refusal the kernel does not make, and would be wrong
-        // rather than merely failing.
-        assert!(
-            std::fs::metadata(root.join("out.snap")).is_err(),
-            "premise: this shape must be unresolvable to the kernel"
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let Some(root) = (8..=MAX_CHAIN).find_map(|n| build_unresolvable(dir.path(), n)) else {
+            // Not an assertion: a kernel that resolves a 128-link chain has no
+            // limit this test can reach, so there is no "chain the kernel
+            // refuses" to hand the resolver. Skipping says that honestly instead
+            // of asserting a premise the platform does not hold.
+            eprintln!(
+                "skipping: this kernel resolves symlink chains up to {MAX_CHAIN} links, \
+                 so no kernel-refused chain could be constructed"
+            );
+            return;
+        };
 
         let ws = workspace_at(&root);
         let err = resolve_refused(&ws, "out.snap");
@@ -3546,29 +3586,36 @@ steps: []
         // depth. The `MAX_DANGLING_LINK_HOPS = 32` / `0..=32` that used to be
         // here capped the *walk* instead, and a walk step is not a kernel hop.
         //
-        // The boundary, measured rather than reasoned about:
+        // The boundary for THIS shape (`hop_0 -> ... -> hop_{n-1} -> real/out.snap`),
+        // re-measured on macOS 26 / arm64 by `stat`-ing generated chains:
         //
         // | links | walk iterations | macOS kernel | Linux kernel (MAXSYMLINKS 40) |
         // |-------|-----------------|--------------|-------------------------------|
-        // | 32    | 33              | ENOENT (ok)  | ok                            |
+        // | 31    | 32              | ENOENT (ok)  | ok                            |
+        // | 32    | 33              | ELOOP        | ok                            |
         // | 33    | 34              | ELOOP        | **ok**                        |
         //
+        // An earlier revision of this table recorded 32 links as ENOENT on
+        // macOS. That is wrong — 32 is already ELOOP here — and the correction
+        // matters for reading the test, though not for its outcome: this chain
+        // is *dangling*, and a dangling chain never reaches `canonicalize`, so
+        // the by-hand walk resolves it whether or not the kernel would. That is
+        // deliberate (it is the only way `out.snap -> real/out.snap` can record
+        // a not-yet-existing target), and it is why this test still passes at a
+        // length the kernel itself refuses.
+        //
         // `0..=32` supplies exactly 33 iterations, so 33 links (34 iterations)
-        // was the first chain it truncated. On macOS that chain is refused by
-        // the kernel anyway, which is why **this defect is not observable on
-        // this host** — it is a Linux-only v1 break, where such a chain is one
-        // 1.2.2 recorded and the cap turned into exit 1. No Linux host was
-        // available to this work, so that break is **not verified by execution**
-        // here; what is verified is the shape below and the numbers in the table
-        // (by running `stat` and an instrumented copy of the walk over generated
-        // chains of 30..41 links).
+        // was the first chain the old cap truncated — a Linux-only v1 break,
+        // where such a chain is one 1.2.2 recorded and the cap turned into exit
+        // 1. No Linux host was available to this work, so that break is **not
+        // verified by execution** here; what is verified is the shape below and
+        // the macOS column of the table.
         //
         // The test therefore asserts the property that holds on every platform:
-        // a chain the running kernel accepts resolves, with no constant of
-        // pitty's able to cut it short. 32 links is the longest macOS accepts,
-        // so it exercises the walk at its deepest here; the visited-path set
-        // that replaced the count has no depth ceiling at all, which is what
-        // removes the Linux break as well.
+        // no constant of pitty's may cut the walk short. The length is kept at
+        // 32 because it exercises the walk deeper than any legitimate layout
+        // would; the visited-path set that replaced the count has no depth
+        // ceiling at all, which is what removes the Linux break as well.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
 
@@ -3686,15 +3733,42 @@ steps: []
         );
         assert_eq!(safe, workspace_dir.join("out.snap"));
 
-        // The display path is deliberately the raw form — that is what makes it
-        // unsafe to open, and why the distinction has to exist at all.
-        assert!(
-            resolved
-                .display_path()
-                .components()
-                .any(|c| c == Component::ParentDir),
-            "display_path is expected to keep the value as written"
+        // The display path is deliberately NOT the sanitized form — that is what
+        // makes it unsafe to open, and why the distinction has to exist at all.
+        //
+        // Asserting that specifically by looking for a surviving `..` was a
+        // macOS/Linux-only premise. `display` is `cwd.join(rel)`, and on Windows
+        // `cwd` comes from `canonicalize()`, which yields a *verbatim* (`\\?\`)
+        // path; `PathBuf::push` documents that "verbatim paths need . and ..
+        // removed" and strips them during the join. So on Windows the raw `..`
+        // is gone before `display` is ever stored, and the old assertion tested
+        // a spelling the platform does not produce rather than the property.
+        //
+        // What must hold everywhere is the distinction itself: `display_path` is
+        // whatever the join produced and is NOT trusted, while `safe_path` is
+        // rebuilt from the validated component sequence. Pinning that they are
+        // *different paths* keeps the defect this test exists to catch — a
+        // `safe_path` derived from `display` — detectable on every platform,
+        // because such a derivation would make the two equal.
+        assert_ne!(
+            resolved.display_path(),
+            safe.as_path(),
+            "safe_path must be rebuilt from the validated components, not taken \
+             from the raw display path"
         );
+
+        // And on the platforms whose join preserves it, the raw `..` really does
+        // survive into `display` — the stronger, spelling-level statement, kept
+        // where it is true rather than asserted everywhere.
+        if !cfg!(windows) {
+            assert!(
+                resolved
+                    .display_path()
+                    .components()
+                    .any(|c| c == Component::ParentDir),
+                "display_path is expected to keep the value as written"
+            );
+        }
     }
 
     #[test]
