@@ -535,7 +535,40 @@ impl Workspace {
         rel: &str,
         access: SnapshotAccess,
     ) -> Result<Result<SnapshotTarget, UnresolvablePath>, PittyError> {
-        let candidate = self.cwd.join(rel);
+        // `join_keeping_parent_dirs`, not `join`, for the same reason
+        // `anchor_in_root_representation` uses it: `self.cwd` may be verbatim
+        // (`\\?\C:\...`) — `base_dir` is `file.parent()` of the path the user
+        // typed, so its representation is the caller's to choose — and
+        // `PathBuf::push` normalizes `.` and `..` away under a verbatim prefix.
+        //
+        // That would silently destroy the one thing `candidate` is for.
+        // `candidate` becomes [`SnapshotTarget::display`], whose documented
+        // contract is "the full path **as written** ... the form that may still
+        // contain `..`", and it is also what `cancelled_directories` walks to
+        // find the directories a `..` cancels. A join that removes the `..`
+        // leaves the target with no as-written form to distinguish from
+        // `safe_path`, and leaves the recorder nothing to attempt — the same
+        // under-recording that `join_keeping_parent_dirs` exists to close.
+        //
+        // An absolute `rel` must still *replace* `self.cwd` (an absolute
+        // in-workspace `file:` is supported and strips back to a relative
+        // sequence), which is the one case the helper deliberately refuses, so
+        // it is taken here instead.
+        let rel_path = Path::new(rel);
+        // Mirrors std's own `need_clear` in `PathBuf::_push`: a path that is
+        // absolute, or that carries a Windows prefix at all (`C:foo` is
+        // drive-relative and still re-roots), replaces the buffer.
+        let rel_replaces_cwd = rel_path.is_absolute()
+            || rel_path.has_root()
+            || matches!(
+                rel_path.components().next(),
+                Some(std::path::Component::Prefix(_))
+            );
+        let candidate = if rel_replaces_cwd {
+            self.cwd.join(rel_path)
+        } else {
+            join_keeping_parent_dirs(&self.cwd, rel_path)
+        };
         // The pre-spawn root, not a fresh `canonical_root(&self.cwd)`. See the
         // `canonical_cwd` field: re-resolving here let a child's rename move the
         // root out from under the descriptor the write actually uses.
@@ -928,6 +961,21 @@ fn resolve_existing_ancestor(path: &Path) -> PathBuf {
     loop {
         if let Ok(real) = existing.canonicalize() {
             let tail = path.strip_prefix(existing).unwrap_or(Path::new(""));
+            // Plain `join`, deliberately — NOT `join_keeping_parent_dirs`.
+            //
+            // `real` is canonical and so verbatim on Windows, which makes the
+            // join strip `.` and `..` from `tail`. That is the very thing
+            // `join_keeping_parent_dirs` exists to prevent elsewhere, and here
+            // it is harmless: `lexical_normalize` immediately removes the same
+            // components anyway. This function's whole job is to produce the
+            // NORMALIZED location for containment to judge, so an early
+            // normalization is the identity, not a loss.
+            //
+            // The distinction is the one that matters across this module: a `..`
+            // is payload wherever a caller still has to WALK it (see
+            // `anchor_in_root_representation`, whose result feeds
+            // `cancelled_directories`), and noise wherever the result is only a
+            // destination. Here it is noise.
             return lexical_normalize(&real.join(tail));
         }
         match existing.parent() {
@@ -1450,9 +1498,32 @@ fn dangling_link_target(walk_root: &Path, canonical_root: &Path, path: &Path) ->
         //     so judging the destination alone would wrongly allow it.
         // `resolve_existing_ancestor` applies the same normalization the rest of
         // the resolver uses, so the two cannot disagree.
+        // `join_keeping_parent_dirs`, not `push` — the third site of the same
+        // Windows defect, and the least obvious of the three.
+        //
+        // `destination` comes from `dangling_link_destination`, which returns
+        // either the probe or `real_parent.join(target)`, and `real_parent` is a
+        // `canonicalize()` result. So on Windows `destination` can carry a
+        // verbatim (`\\?\`) prefix, and `PathBuf::push` then pops on each `..`
+        // instead of appending it.
+        //
+        // Containment would not notice: `resolve_existing_ancestor(&full)`
+        // normalizes the `..` away regardless, so the location judged is the
+        // same either way. What DOES notice is
+        // `climbs_through_missing_component(&full)` immediately below, which
+        // pattern-matches `Component::ParentDir` to enforce that a `..` may only
+        // cancel a component that exists. With the `..` already gone, that guard
+        // matches nothing and silently becomes a no-op.
+        //
+        // The shape it stops is data loss, not an escape: `link -> missing-dir`
+        // with `file: link/../victim.snap`. The kernel refuses that with ENOENT
+        // (1.2.2 reported "not recorded" and failed), while the lexical answer is
+        // the real, unrelated `victim.snap` — which `--update` would then
+        // truncate. Keeping the `..` walkable keeps the guard armed on Windows
+        // too.
         let mut full = destination;
         for tail in &all[index + 1..] {
-            full.push(tail.as_os_str());
+            full = join_keeping_parent_dirs(&full, Path::new(tail.as_os_str()));
         }
         // A `..` in the tail may only cancel a component that actually EXISTS.
         //
@@ -1587,8 +1658,6 @@ fn cancelled_directories(
     root: &Path,
     candidate: &Path,
 ) -> Result<Vec<Vec<std::ffi::OsString>>, PathRepresentationMismatch> {
-    use std::path::Component;
-
     // Anchored on the SAME resolved path containment judges, and on the same
     // canonical root it strips against — see `PathRepresentationMismatch` for
     // why this is now one derivation instead of two.
@@ -1615,6 +1684,22 @@ fn cancelled_directories(
     // does for containment), and the not-yet-existing tail is appended
     // unnormalized so its `..` components survive to be counted below.
     let anchored = anchor_in_root_representation(candidate);
+    cancellations_along(root, &anchored)
+}
+
+/// Walk an already-anchored path and collect the in-root directories its `..`
+/// components cancel.
+///
+/// Split out from [`cancelled_directories`] so it can be driven with a
+/// synthetic anchored path. Anchoring itself calls `canonicalize`, so on a Unix
+/// host the full function can never be handed the verbatim (`\\?\`) prefix that
+/// the Windows defects live under; this half can, which is what makes the
+/// property testable off Windows at all.
+fn cancellations_along(
+    root: &Path,
+    anchored: &Path,
+) -> Result<Vec<Vec<std::ffi::OsString>>, PathRepresentationMismatch> {
+    use std::path::Component;
 
     // Walk the anchored path the way the kernel resolves it, maintaining the
     // walk's ACTUAL position at every step rather than deciding once where it
@@ -1694,13 +1779,100 @@ fn anchor_in_root_representation(path: &Path) -> PathBuf {
     loop {
         if let Ok(real) = existing.canonicalize() {
             let tail = path.strip_prefix(existing).unwrap_or(Path::new(""));
-            return real.join(tail);
+            return join_keeping_parent_dirs(&real, tail);
         }
         match existing.parent() {
             Some(parent) => existing = parent,
             None => return path.to_path_buf(),
         }
     }
+}
+
+/// Append `tail` to `prefix` without letting the join normalize `tail`'s `..`
+/// components away.
+///
+/// # Why not `Path::join`
+///
+/// `join`/`PathBuf::push` documents that "if `self` has a verbatim prefix (e.g.
+/// `\\?\C:\windows`) and `path` is not empty, the new path is normalized: all
+/// references to `.` and `..` are removed". `canonicalize()` returns exactly
+/// such a verbatim path on Windows, so `real.join(tail)` took that branch and
+/// each `..` in `tail` popped the preceding component instead of surviving into
+/// the result.
+///
+/// That silently defeated the caller. [`cancelled_directories`] exists to
+/// record the directories a `..` cancels, and it can only see them if the `..`
+/// is still there to walk: `w/inside/../victim.snap` arrived already flattened
+/// to `w/victim.snap`, `inside` was never recorded, the recorder never
+/// attempted it, and `traversed_dirs` came back empty on Windows where Unix
+/// records an entry. Every test that would have caught it is `cfg(unix)`, which
+/// is why CI stayed quiet.
+///
+/// # Why not a raw concatenation either
+///
+/// Splicing the two `OsStr`s together and letting the result re-parse is not
+/// enough, because the *separator alphabet* changes under a verbatim prefix.
+/// `Components::is_sep_byte` (std `path.rs`) dispatches on `prefix_verbatim()`
+/// and calls `is_verbatim_sep`, which (std `sys/path/windows.rs`) accepts only
+/// `b'\\'`; the non-verbatim `is_sep_byte` comes from
+/// `path_separator_bytes!(b'\\', b'/')` and accepts both. So a `/`-spelled tail
+/// concatenated onto `\\?\C:\real` yields `\\?\C:\real\inside/../victim.snap`,
+/// whose components are `Prefix`, `RootDir`, `Normal("real")`,
+/// `Normal("inside/../victim.snap")` — one opaque component, still zero
+/// `ParentDir`. The under-recording would only have moved, not gone.
+///
+/// Decomposing *after* concatenation is therefore too late. The split must
+/// happen while the tail is still being read in its own syntax.
+///
+/// # How
+///
+/// `tail` is decomposed first, on its own: it carries no prefix, so it parses
+/// under the non-verbatim rules that accept both separators and every `..` it
+/// spells becomes a real `Component::ParentDir`. Those components are then
+/// re-spelled onto `prefix` with `MAIN_SEPARATOR_STR` — the one separator both
+/// alphabets accept — so the result re-parses to the same component sequence
+/// whether or not `prefix` is verbatim.
+///
+/// The write is byte-level rather than `PathBuf::push` precisely because `push`
+/// is what removes the `..`; nothing here consults `prefix`'s own components, so
+/// no normalization can occur. `prefix` is canonical and carries no `..` of its
+/// own. A `CurDir` is dropped (it names the same directory and is not a
+/// cancellation), and a `RootDir` or `Prefix` in the tail is impossible — the
+/// caller obtains `tail` from `strip_prefix`, which yields a relative remainder.
+/// Passing one anyway would re-root the path, so it is refused by returning the
+/// prefix rather than silently splicing an absolute path in.
+fn join_keeping_parent_dirs(prefix: &Path, tail: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut joined = prefix.as_os_str().to_os_string();
+    // A canonical root can be a bare separator (`/`) or a verbatim drive root
+    // (`\\?\C:\`), both of which already end in one. Pushing a second would
+    // spell `//`, which Windows reads as the start of a UNC prefix and POSIX
+    // leaves implementation-defined. Asked byte-wise against the separator the
+    // verbatim parser accepts *plus* `/`, because either one ending `prefix`
+    // means a separator is already there however the path is later parsed.
+    let mut needs_sep = !matches!(
+        prefix.as_os_str().as_encoded_bytes().last(),
+        Some(b'/') | Some(b'\\') | None
+    );
+
+    for component in tail.components() {
+        let name = match component {
+            Component::Normal(name) => name,
+            Component::ParentDir => Component::ParentDir.as_os_str(),
+            Component::CurDir => continue,
+            // A rooted tail would replace `prefix` rather than extend it. The
+            // caller never produces one; refuse rather than splice.
+            Component::RootDir | Component::Prefix(_) => return prefix.to_path_buf(),
+        };
+        if needs_sep {
+            joined.push(std::path::MAIN_SEPARATOR_STR);
+        }
+        joined.push(name);
+        needs_sep = true;
+    }
+
+    PathBuf::from(joined)
 }
 
 fn relative_components(root: &Path, path: &Path) -> Option<Vec<std::ffi::OsString>> {
@@ -2885,6 +3057,329 @@ steps: []
         assert!(
             !workspace.join("out.snap").exists(),
             "nothing may be written into the substituted directory"
+        );
+    }
+
+    #[test]
+    fn anchoring_keeps_the_parent_dirs_that_are_the_whole_payload() {
+        // (Data loss, Windows-only) The anchored path must still SPELL its `..`
+        // components, because `cancelled_directories` can only record the
+        // directory a `..` cancels by walking the `..` itself.
+        //
+        // `anchor_in_root_representation` used `real.join(tail)`. `PathBuf::push`
+        // documents that a verbatim prefix (`\\?\C:\...`) makes the join
+        // normalize — "all references to `.` and `..` are removed" — and
+        // `canonicalize()` returns exactly such a prefix on Windows. So on
+        // Windows each `..` popped the preceding component during the join:
+        // `w/inside/../victim.snap` arrived already flattened to
+        // `w/victim.snap`, `inside` was never recorded, the recorder never
+        // attempted it, and `traversed_dirs` came back empty where Unix records
+        // an entry.
+        //
+        // This test is deliberately NOT `cfg(unix)`-gated and does not touch the
+        // filesystem: every existing test in this area is Unix-only, which is
+        // precisely why CI stayed green while the defect shipped. Driving the
+        // join helper directly with a verbatim-shaped prefix reproduces the
+        // Windows branch's INPUT on any host — on Windows it additionally
+        // exercises the real normalization path.
+        //
+        // The SPELLING is asserted alongside the components, and that is not
+        // redundant. A first attempt at the fix concatenated the two halves and
+        // let the result re-parse, which is unsound because the separator
+        // alphabet narrows under a verbatim prefix: std's
+        // `Components::is_sep_byte` dispatches on `prefix_verbatim()` to
+        // `is_verbatim_sep`, which accepts only `b'\\'`, while the non-verbatim
+        // `is_sep_byte` comes from `path_separator_bytes!(b'\\', b'/')` and
+        // accepts both. So `\\?\C:\real` + `inside/../victim.snap` re-parsed to
+        // a SINGLE opaque `Normal("inside/../victim.snap")` — still zero
+        // `ParentDir`, the bug merely relocated. That second failure is NOT
+        // visible from a Unix host at all (see the note at the end of this
+        // test); what is pinned here is the contract whose violation causes it.
+        use std::path::Component;
+
+        let prefix = if cfg!(windows) {
+            PathBuf::from(r"\\?\C:\real")
+        } else {
+            PathBuf::from("/real")
+        };
+        let anchored = join_keeping_parent_dirs(&prefix, Path::new("inside/../victim.snap"));
+
+        let parents = anchored
+            .components()
+            .filter(|c| *c == Component::ParentDir)
+            .count();
+        assert_eq!(
+            parents, 1,
+            "the `..` is the payload the caller walks; a join that normalizes it \
+             away leaves nothing to record: {anchored:?}"
+        );
+        assert!(
+            anchored
+                .components()
+                .any(|c| c == Component::Normal(std::ffi::OsStr::new("inside"))),
+            "the cancelled directory must survive to be recorded: {anchored:?}"
+        );
+        // The two assertions above cannot fail on a Unix host, and saying so is
+        // part of the test.
+        //
+        // On macOS `MAIN_SEPARATOR` IS `/`, so a raw concatenation of a
+        // `/`-spelled tail re-parses into exactly the right components and
+        // satisfies both — verified by execution, by swapping the
+        // implementation for that concatenation and watching them stay green.
+        // A `MAIN_SEPARATOR`-based spelling check is no better, for the same
+        // reason. The Windows-only half of this defect is genuinely invisible
+        // here; `just check-windows` and Windows CI are what cover it.
+        //
+        // What IS checkable on any host is the contract the implementation must
+        // satisfy for the Windows case to work: the output's components are the
+        // prefix's followed by the tail's, with the tail decomposed in its OWN
+        // syntax. An implementation obeying that is correct under a verbatim
+        // prefix; one that splices raw bytes only appears to obey it where the
+        // host's separator alphabet happens to match.
+        let expected: Vec<_> = prefix
+            .components()
+            .chain(Path::new("inside/../victim.snap").components())
+            .collect();
+        assert_eq!(
+            anchored.components().collect::<Vec<_>>(),
+            expected,
+            "the output must decompose to the prefix's components followed by the \
+             tail's, each parsed in its own syntax: {anchored:?}"
+        );
+    }
+
+    #[test]
+    fn anchoring_onto_a_root_prefix_does_not_double_the_separator() {
+        // A canonical prefix can already end in a separator — `/` on Unix, and a
+        // verbatim drive root (`\\?\C:\`) on Windows. The helper writes the
+        // separator itself, so pin that a second one is not added: `//` opens a
+        // UNC prefix on Windows and is implementation-defined on POSIX, either
+        // of which would re-root the path the caller then walks.
+        //
+        // Compared as `as_os_str()`, NOT as `Path`. `PathBuf::eq` and `Path::eq`
+        // both delegate to `components()` (std `path.rs`), which collapses
+        // repeated separators — so a `Path`-level comparison here would pass
+        // even if the helper returned `//a`, i.e. it would assert nothing about
+        // the very thing this test is named for.
+        let root = if cfg!(windows) {
+            PathBuf::from(r"\\?\C:\")
+        } else {
+            PathBuf::from(std::path::MAIN_SEPARATOR_STR)
+        };
+        let anchored = join_keeping_parent_dirs(&root, Path::new("a"));
+
+        let mut expected = root.as_os_str().to_os_string();
+        expected.push("a");
+        assert_eq!(
+            anchored.as_os_str(),
+            expected.as_os_str(),
+            "a prefix that already ends in a separator must not get a second one"
+        );
+    }
+
+    #[test]
+    fn anchoring_an_empty_tail_returns_the_prefix_unchanged() {
+        // `strip_prefix` yields an empty tail whenever the whole path already
+        // exists. Appending a separator to that would name a different path, so
+        // the empty case returns the prefix as-is.
+        //
+        // `as_os_str()` again: `Path::eq` normalizes a trailing separator away
+        // via `components()`, so comparing as paths would pass even if the
+        // helper wrongly appended one.
+        let prefix = PathBuf::from(std::path::MAIN_SEPARATOR_STR).join("real");
+        assert_eq!(
+            join_keeping_parent_dirs(&prefix, Path::new("")).as_os_str(),
+            prefix.as_os_str(),
+            "an empty tail must not append a trailing separator"
+        );
+    }
+
+    #[test]
+    fn anchoring_refuses_a_rooted_tail_rather_than_splicing_it_in() {
+        // The helper writes bytes rather than pushing components, so an absolute
+        // tail would be spliced into the middle of the prefix
+        // (`/real` + `/etc/passwd` -> `/real//etc/passwd`) instead of replacing
+        // it the way `Path::join` would. Callers obtain `tail` from
+        // `strip_prefix`, which never yields a rooted path, so this is a
+        // defensive refusal — pinned because "impossible" inputs are exactly
+        // what the next refactor changes.
+        let prefix = PathBuf::from(std::path::MAIN_SEPARATOR_STR).join("real");
+        let rooted = PathBuf::from(std::path::MAIN_SEPARATOR_STR).join("etc");
+        assert_eq!(
+            join_keeping_parent_dirs(&prefix, &rooted).as_os_str(),
+            prefix.as_os_str(),
+            "a rooted tail must be refused, not spliced into the prefix"
+        );
+    }
+
+    #[test]
+    fn a_link_tail_re_appended_onto_a_verbatim_destination_keeps_its_parent_dirs() {
+        // (Data loss, Windows-only) The THIRD site of the same defect, found by
+        // sweeping for `join`/`push` whose left-hand side may be
+        // canonicalize-derived and whose tail's `..` is meaningful.
+        //
+        // `dangling_link_target` re-appends the components that followed a
+        // dangling link onto the destination that link resolves to. That
+        // destination comes from `dangling_link_destination`, which returns
+        // `real_parent.join(target)` — `real_parent` being a `canonicalize()`
+        // result, hence verbatim on Windows. A plain `push` of a `..` onto it
+        // pops rather than appends.
+        //
+        // Containment is blind to the difference (`resolve_existing_ancestor`
+        // normalizes either way), so only one consumer notices:
+        // `climbs_through_missing_component`, which matches on
+        // `Component::ParentDir` to refuse a `..` that crosses a component the
+        // kernel cannot traverse. With the `..` gone that guard silently matches
+        // nothing, and `link -> missing-dir` + `file: link/../victim.snap`
+        // reaches a real neighbouring snapshot that `--update` then truncates —
+        // where 1.2.2 failed with ENOENT.
+        //
+        // The guard itself stats the filesystem, so it cannot be driven with a
+        // synthetic verbatim path. What is pinned here is the assembly step it
+        // depends on: the re-append must leave a walkable `..` behind.
+        //
+        // Honest limitation: like the anchoring test above, this cannot fail on
+        // a Unix host. `/w/missing-dir` is not verbatim, so `push` appends the
+        // `..` there exactly as the helper does — verified by execution, by
+        // reverting the call site to `push` and watching this stay green on
+        // macOS. It earns its keep on Windows CI, where the same source reads a
+        // verbatim prefix. The cross-platform assertion is the last one: that
+        // the result is destination-components ++ tail-components, which is the
+        // contract a correct implementation satisfies on both.
+        use std::path::Component;
+
+        let destination = if cfg!(windows) {
+            PathBuf::from(r"\\?\C:\w\missing-dir")
+        } else {
+            PathBuf::from("/w/missing-dir")
+        };
+
+        // The same loop `dangling_link_target` runs, one component at a time.
+        let mut full = destination.clone();
+        for tail in [
+            std::ffi::OsString::from(".."),
+            std::ffi::OsString::from("victim.snap"),
+        ] {
+            full = join_keeping_parent_dirs(&full, Path::new(&tail));
+        }
+
+        assert!(
+            full.components().any(|c| c == Component::ParentDir),
+            "the `..` must survive the re-append or the missing-component guard \
+             has nothing to match on: {full:?}"
+        );
+        assert!(
+            full.components()
+                .any(|c| c == Component::Normal(std::ffi::OsStr::new("missing-dir"))),
+            "the component the `..` crosses must still be named, or the guard \
+             cannot tell that it is missing: {full:?}"
+        );
+        assert_eq!(
+            full.components().collect::<Vec<_>>(),
+            destination
+                .components()
+                .chain(Path::new("../victim.snap").components())
+                .collect::<Vec<_>>(),
+            "the re-append must be destination-components followed by tail-components"
+        );
+    }
+
+    #[test]
+    fn a_verbatim_anchored_path_still_yields_its_cancelled_directory() {
+        // This is the test that ties `join_keeping_parent_dirs` to the consumer
+        // the whole change exists for, and it does so on ANY host.
+        //
+        // The end-to-end test below is the honest one, but it can only catch a
+        // reverted helper on Windows: off Windows `canonicalize` never produces
+        // a verbatim prefix, so `real.join(tail)` and the helper are
+        // indistinguishable there and the revert stays green. Verified by
+        // execution on macOS — reverting the call site to `real.join(tail)` left
+        // the end-to-end test passing.
+        //
+        // So the anchoring is fed in directly. `cancellations_along` is the walk
+        // half of `cancelled_directories`, split out precisely because the other
+        // half calls `canonicalize` and therefore cannot be handed a synthetic
+        // verbatim path. Composing the helper with that walk reproduces the full
+        // Windows pipeline's INPUT on any host: if the helper drops the `..`
+        // (the original defect) or fuses the tail into one opaque component (the
+        // defect the first fix attempt introduced, because a verbatim prefix
+        // narrows the separator alphabet to `\` alone), the cancelled directory
+        // does not come back and this fails here, on macOS, in CI.
+        let (root, prefix) = if cfg!(windows) {
+            (PathBuf::from(r"\\?\C:\w"), PathBuf::from(r"\\?\C:\w"))
+        } else {
+            (PathBuf::from("/w"), PathBuf::from("/w"))
+        };
+        let anchored = join_keeping_parent_dirs(&prefix, Path::new("inside/../victim.snap"));
+
+        let cancelled = cancellations_along(&root, &anchored).expect("representations match");
+        let names: Vec<Vec<String>> = cancelled
+            .iter()
+            .map(|seq| {
+                seq.iter()
+                    .map(|c| c.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![vec!["inside".to_string()]],
+            "the `..` must still be a walkable component when the walk sees it, \
+             anchored path was {anchored:?}"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_directory_reaches_traversed_dirs_on_every_platform() {
+        // This is the test that ties the join helper to the behaviour that
+        // actually matters, and it is NOT `cfg(unix)`-gated.
+        //
+        // The helper's own unit tests are necessary but not sufficient: with
+        // only those, reverting `join_keeping_parent_dirs` to `prefix.join(tail)`
+        // still leaves them green on Unix, and reverting the CALL SITES to
+        // `real.join(tail)` / `cwd.join(rel)` does not touch them at all. So
+        // nothing connected the helper to `cancelled_directories`, which is the
+        // consumer the whole change exists for.
+        //
+        // The property under test: a directory that the `file:` value NAMES but
+        // a `..` then cancels must still reach `traversed_dirs`, so the recorder
+        // attempts to create it and the kernel — not a prediction — decides
+        // whether it can. `w/inside/../victim.snap` normalizes to
+        // `w/victim.snap`, so `inside` appears in no component sequence; only
+        // the surviving `..` in the anchored path can put it there.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let workspace_dir = root.join("w");
+        std::fs::create_dir(&workspace_dir).unwrap();
+        let ws = workspace_at(&workspace_dir);
+
+        let resolved = resolve_ok_expect(
+            &ws,
+            "inside/../victim.snap",
+            "a cancellation inside the workspace must resolve",
+        );
+
+        // The snapshot itself lands at the normalized location...
+        assert_eq!(resolved.safe_path(), workspace_dir.join("victim.snap"));
+
+        // ...and the cancelled directory is still recorded for the recorder to
+        // attempt. On Windows this is precisely what came back empty: the join
+        // had removed the `..` (or, after the first attempted fix, fused the
+        // whole tail into one opaque component) before `cancelled_directories`
+        // ever saw it.
+        let recorded: Vec<Vec<String>> = resolved
+            .traversed_dirs()
+            .iter()
+            .map(|seq| {
+                seq.iter()
+                    .map(|c| c.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            vec![vec!["inside".to_string()]],
+            "the directory the `..` cancels must reach traversed_dirs"
         );
     }
 
