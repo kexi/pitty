@@ -73,14 +73,19 @@
         }
       }
     },
+    "splitMode": {
+      "description": "How `spawn.command` is tokenized. `whitespace` (the default, and the only behavior before this field existed) splits on runs of whitespace and treats quotes as ordinary bytes; `posix` applies POSIX shell word rules, consuming quotes and backslash escapes as grouping syntax. Only expressible in the mapping form of `spawn`. Matched case-insensitively after trimming surrounding whitespace, like `key` and `source`. Deliberately unconstrained — no `type`, `enum` or `pattern`: `split` did not exist before pitty added it, so every earlier 1.x accepts ANY value of ANY type at this key and ignores it. pitty therefore accepts them too, falling back to `whitespace` and warning on stderr, rather than erroring. Constraining the value (or even the type) here would make an editor flag a document pitty accepts, which is the schema/implementation drift tests/schema_contract.rs forbids. `examples` documents the two meaningful values without constraining them.",
+      "default": "whitespace",
+      "examples": ["whitespace", "posix"]
+    },
     "duration": {
       "description": "A duration string such as `2s` or `500ms`.",
       "type": "string"
     },
     "source": {
-      "description": "Where an assertion reads text/JSON from: the bare string `output`, or a {file: path} mapping.",
+      "description": "Where an assertion reads text/JSON from: the bare string `output`, or a {file: path} mapping. The keyword is matched case-insensitively after trimming surrounding whitespace (so `Output`, `OUTPUT`, `  output  ` all work), and an empty string means the default `output` — the same normalization the deserializer applies, mirrored here the way `key` mirrors its own. Spelled with two-case character classes for the same ECMA-262 reason as `key`.",
       "oneOf": [
-        { "type": "string", "enum": ["output"] },
+        { "type": "string", "pattern": "^\\s*([Oo][Uu][Tt][Pp][Uu][Tt])?\\s*$" },
         {
           "type": "object",
           "required": ["file"],
@@ -119,8 +124,9 @@
       }
     },
     "step": {
-      "description": "A one-key map naming the step kind. Exactly one of these keys must be present.",
+      "description": "A one-key map naming the step kind. Exactly one of these keys must be present; an unknown step name is a Scenario error.",
       "type": "object",
+      "additionalProperties": false,
       "minProperties": 1,
       "maxProperties": 1,
       "properties": {
@@ -136,7 +142,8 @@
                 "env": {
                   "type": "object",
                   "additionalProperties": { "type": "string" }
-                }
+                },
+                "split": { "$ref": "#/definitions/splitMode" }
               }
             }
           ]
@@ -144,9 +151,9 @@
         "send": { "type": "string" },
         "send_raw": { "type": "string" },
         "key": {
-          "description": "A named key, matched case-insensitively after trimming surrounding whitespace (so `Enter`, `ENTER`, `Ctrl+C` all work). Recognized names: enter, tab, escape (alias esc), backspace, up, down, left, right, ctrl+c, ctrl+d, ctrl+z.",
+          "description": "A named key, matched case-insensitively after trimming surrounding whitespace (so `Enter`, `ENTER`, `Ctrl+C` all work). Recognized names: enter, tab, escape (alias esc), backspace, up, down, left, right, ctrl+c, ctrl+d, ctrl+z. Case-insensitivity is spelled out as two-case character classes rather than an inline `(?i)` flag, which is a syntax error in the ECMA-262 regex dialect draft-07 specifies and that editors' YAML language servers use.",
           "type": "string",
-          "pattern": "(?i)^\\s*(enter|tab|escape|esc|backspace|up|down|left|right|ctrl\\+[cdz])\\s*$"
+          "pattern": "^\\s*([Ee][Nn][Tt][Ee][Rr]|[Tt][Aa][Bb]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ee][Ss][Cc]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Cc][Tt][Rr][Ll]\\+[CcDdZz])\\s*$"
         },
         "wait": { "$ref": "#/definitions/duration" },
         "expect": { "$ref": "#/definitions/matchSpec" },
@@ -178,17 +185,36 @@
         },
         "expect_running": { "type": "boolean" },
         "expect_json": {
-          "description": "Requires `path` and exactly one of equals/contains/exists.",
+          "description": "Requires `path` and exactly one of equals/contains/exists, encoded as branches over the three check fields, matching varSpec/source/spawn/expect_exit; `exists` is pinned to true because `exists: false` is a Scenario error, not a negated check. One documented exception: an explicitly null `equals` alongside exactly one other check is accepted, because pitty 1.2.2 executed those documents (see the carve-out branch below).",
           "type": "object",
           "required": ["path"],
           "properties": {
             "path": { "type": "string" },
             "equals": {},
             "contains": { "type": "string" },
-            "exists": { "type": "boolean" },
+            "exists": { "type": "boolean", "const": true },
             "source": { "$ref": "#/definitions/source" },
             "timeout": { "$ref": "#/definitions/duration" }
-          }
+          },
+          "anyOf": [
+            {
+              "comment": "Exactly one check written, the ordinary case.",
+              "oneOf": [
+                { "required": ["equals"] },
+                { "required": ["contains"] },
+                { "required": ["exists"] }
+              ]
+            },
+            {
+              "comment": "v1 compatibility: pitty 1.2.2 discarded `equals: null` while deserializing, so pairing it with exactly one other check executed that other check. COMPATIBILITY.md forbids turning a document 1.2.2 ran into an error, so the runtime still accepts these and the schema must agree. Scoped to one other check: with two, 1.2.2 rejected the document and both sides still do.",
+              "properties": { "equals": { "type": "null" } },
+              "required": ["equals"],
+              "oneOf": [
+                { "required": ["contains"], "not": { "required": ["exists"] } },
+                { "required": ["exists"], "not": { "required": ["contains"] } }
+              ]
+            }
+          ]
         },
         "expect_snapshot": {
           "type": "object",

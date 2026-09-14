@@ -83,18 +83,17 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 impl PtySession {
     /// Open a PTY and spawn `command` (a shell-style command line) within it.
     ///
-    /// The first whitespace-separated token is the program; the remainder are
-    /// arguments. `cwd` sets the working directory and `env` injects extra
-    /// environment variables. PTY/spawn failures classify as
-    /// [`PittyError::Process`] (exit code 3).
-    ///
-    /// Argument splitting is plain `split_whitespace`: it does NOT honor shell
-    /// quoting or escapes, so a program path containing spaces or an argument
-    /// with embedded whitespace (e.g. `"my arg"`) is not parsed as a single
-    /// token. We avoid a shell-quoting parser in v0.1 to keep spawning
-    /// dependency-free and predictable; wrap such a command in an explicit shell
-    /// (`spawn: sh -c '...'`) if you need shell semantics.
-    pub fn spawn(command: &str, cwd: &Path, env: &[(String, String)]) -> Result<Self, PittyError> {
+    /// `command` is split under `split` (see [`split_command`]): the first
+    /// word is the program, the rest are its arguments. `cwd` sets the working
+    /// directory and `env` injects extra environment variables. Tokenization,
+    /// PTY, and spawn failures all classify as [`PittyError::Process`] (exit
+    /// code 3).
+    pub fn spawn(
+        command: &str,
+        split: &SplitMode,
+        cwd: &Path,
+        env: &[(String, String)],
+    ) -> Result<Self, PittyError> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -105,12 +104,12 @@ impl PtySession {
             })
             .map_err(|e| PittyError::Process(format!("openpty failed: {e}")))?;
 
-        let mut parts = command.split_whitespace();
-        let program = parts
-            .next()
+        let words = split_command(command, split)?;
+        let (program, args) = words
+            .split_first()
             .ok_or_else(|| PittyError::Process("empty spawn command".to_string()))?;
         let mut builder = CommandBuilder::new(program);
-        for arg in parts {
+        for arg in args {
             builder.arg(arg);
         }
         builder.cwd(cwd);
@@ -452,6 +451,215 @@ impl PtySession {
     }
 }
 
+/// How a `spawn` command line is turned into `[program, args...]`.
+///
+/// Two rules, because the scenario format is frozen under the v1 compatibility
+/// contract (`COMPATIBILITY.md`): the tokenization a scenario got in 1.0 must
+/// still be what it gets in every later 1.x, so the historical rule stays the
+/// default and the better rule is opt-in per `spawn`.
+///
+/// Deserialized from the YAML keyword `whitespace` or `posix`, matched
+/// case-insensitively after trimming, the same normalization `key` and
+/// `source` apply.
+///
+/// An unrecognized keyword is **not** a hard error. It deserializes to
+/// [`SplitMode::Unknown`], which tokenizes as the default and warns on stderr.
+/// That looks like the wrong call — a typo'd `split: pisox` silently gives the
+/// author the behavior they were opting out of, which is what strictness would
+/// prevent — but the alternative breaks the v1 contract, and the contract wins:
+///
+/// `split` did not exist before this release, so every pitty already in the
+/// field parses `split: <anything>` by ignoring it entirely (nested
+/// `deny_unknown_fields` is deliberately off; see `COMPATIBILITY.md`). A
+/// scenario with an unrecognized value therefore *runs* on 1.2.2 and every
+/// earlier 1.x. Rejecting it here would tighten validation so a previously
+/// valid scenario becomes an error — the exact clause this whole field exists
+/// to respect. The warning is how the typo stays visible without becoming
+/// fatal.
+///
+/// Note this is narrower than "pitty is lenient about keyword values": `key`
+/// and `source` reject unknown values outright, and 1.2.2 did too. The
+/// difference is that those fields *existed*, so an old runner's verdict on a
+/// bad value is already an error; `split` did not, so an old runner's verdict
+/// is "accepted and ignored", and a new runner may not be stricter than that.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SplitMode {
+    /// Split on any run of whitespace, exactly as `str::split_whitespace` does.
+    ///
+    /// Quotes and backslashes carry no meaning: they are ordinary bytes inside
+    /// a word and reach the child verbatim. This is what pitty has always done
+    /// and therefore what the v1 contract pins as the default.
+    #[default]
+    Whitespace,
+    /// Split with POSIX shell word rules: `'...'`, `"..."`, and backslash
+    /// escapes group, and the quote characters are consumed rather than passed
+    /// to the child. Opt in per `spawn` with `split: posix`.
+    Posix,
+    /// A value this pitty does not recognize, described for the warning.
+    ///
+    /// Tokenizes as [`SplitMode::Whitespace`] and warns, because that is what
+    /// every pitty released before `split` existed does with the same document
+    /// (minus the warning).
+    ///
+    /// Holds a short *description* rather than the value itself: an unknown
+    /// keyword is quoted verbatim (`"pisox"`), but a non-string is named by
+    /// type (`a number`, `a mapping`), so a large list or map cannot flood
+    /// stderr with a structure the author can already see in their scenario.
+    Unknown(String),
+}
+
+/// The `split` keywords, in declaration order, for the schema contract gate.
+pub const SPLIT_MODE_NAMES: &[&str] = &["whitespace", "posix"];
+
+/// The resolved tokenization rule: [`SplitMode`] with the unknown case already
+/// collapsed onto the default. Exists so `split_command` has no unreachable arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectiveSplit {
+    Whitespace,
+    Posix,
+}
+
+impl<'de> serde::Deserialize<'de> for SplitMode {
+    /// Accept **any** YAML value at `split`, recognizing only the two keywords.
+    ///
+    /// Why not `#[serde(from = "String")]`: that makes `split` a string-typed
+    /// field, so `split: 42` fails to deserialize. Inside the untagged
+    /// `SpawnSpecRaw` that failure rejects the whole `spawn` map, and the
+    /// author sees "data did not match any variant" without `split` being
+    /// mentioned at all. More importantly it is the same contract break as a
+    /// rejected keyword, one type away: a pitty predating this field ignores
+    /// `split: <any YAML value>` and runs the scenario, so this build may not
+    /// be stricter about the *type* than about the *value*.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_norway::Value::deserialize(deserializer)?;
+        Ok(SplitMode::from_value(&value))
+    }
+}
+
+impl SplitMode {
+    /// Interpret an arbitrary YAML value as a split mode.
+    ///
+    /// A recognized keyword (trimmed, case-folded) selects its rule; everything
+    /// else — an unknown keyword, or any non-string type — becomes
+    /// [`SplitMode::Unknown`] carrying a description for the warning.
+    fn from_value(value: &serde_norway::Value) -> Self {
+        let Some(text) = value.as_str() else {
+            return SplitMode::Unknown(describe_yaml_type(value));
+        };
+        match text.trim().to_ascii_lowercase().as_str() {
+            "whitespace" => SplitMode::Whitespace,
+            "posix" => SplitMode::Posix,
+            _ => SplitMode::Unknown(format!("{text:?}")),
+        }
+    }
+}
+
+/// Name a YAML value by type, for a warning that must not echo its content.
+fn describe_yaml_type(value: &serde_norway::Value) -> String {
+    use serde_norway::Value;
+    match value {
+        Value::Null => "a null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::Sequence(_) => "a list",
+        Value::Mapping(_) => "a mapping",
+        Value::Tagged(_) => "a tagged value",
+        Value::String(_) => "a string",
+    }
+    .to_string()
+}
+
+impl SplitMode {
+    /// The rule this mode actually tokenizes under.
+    ///
+    /// [`SplitMode::Unknown`] resolves to the default, matching what a pitty
+    /// that predates the field does with the same scenario. The return type
+    /// cannot represent "unknown", so the tokenizer below is total by
+    /// construction rather than by a fallback arm that could silently absorb a
+    /// future variant.
+    fn effective(&self) -> EffectiveSplit {
+        match self {
+            SplitMode::Posix => EffectiveSplit::Posix,
+            // Whitespace, and anything this build does not recognize.
+            SplitMode::Whitespace | SplitMode::Unknown(_) => EffectiveSplit::Whitespace,
+        }
+    }
+
+    /// The stderr warning this mode owes the author, if any.
+    ///
+    /// An unrecognized keyword is not fatal (see the type docs), so the warning
+    /// is the only signal a typo gets. It names the spelling and says which
+    /// rule was actually used, so `split: pisox` cannot look like it worked.
+    pub fn warning(&self) -> Option<String> {
+        let SplitMode::Unknown(keyword) = self else {
+            return None;
+        };
+        Some(format!(
+            "warning: unrecognized spawn split mode {keyword} (expected one of: {}); \
+             using the default `whitespace` rule. Older pitty releases ignore \
+             this field entirely, so it cannot be an error.",
+            SPLIT_MODE_NAMES.join(", ")
+        ))
+    }
+}
+
+/// Split a `spawn` command line into `[program, args...]` under `mode`.
+///
+/// How, for [`SplitMode::Whitespace`]: `str::split_whitespace`, so every run of
+/// whitespace separates words and nothing else is interpreted. `echo 'hello
+/// world'` yields three words and the child prints the quote characters back.
+/// That is a footgun, but it is the behavior scenarios recorded snapshots
+/// against, so it stays the default (see [`SplitMode`]).
+///
+/// How, for [`SplitMode::Posix`]: delegates to `shell_words::split`, which
+/// honors `'...'` (literal), `"..."` (escapes recognized inside), and backslash
+/// escapes, and rejects an unterminated quote. Quotes and escapes are *grouping
+/// syntax* and are consumed, so `echo 'hello world'` yields two words, the
+/// second containing a space, rather than leaking `'` into the child's output.
+///
+/// Why not hand-roll the POSIX splitter: the corner cases (quote nesting,
+/// escapes inside versus outside double quotes, a trailing backslash, an
+/// unmatched quote) are exactly the ones a naive parser gets subtly wrong, and
+/// a wrong split silently execs a *different* program than the author wrote —
+/// the failure mode the opt-in exists to remove. `shell-words` is the
+/// long-established implementation of this rule.
+///
+/// Why not interpose a real shell (`sh -c <command>`) instead: that would make
+/// every scenario inherit the host shell's globbing, redirection, variable
+/// expansion, and job control, so the program under test would no longer be the
+/// direct PTY child. Teardown depends on that directness — the child is the
+/// session leader whose pid names the group `shutdown` sweeps — and `cmd.exe`
+/// has neither the same quoting rules nor the same semantics, so the scenario
+/// format would mean two different things on two platforms. Splitting in-process
+/// and exec'ing the program ourselves keeps one rule everywhere.
+///
+/// Why POSIX rules on Windows too, once opted in: `CommandBuilder` takes an argv
+/// vector on every platform (portable-pty performs the Windows argv ->
+/// command-line re-quoting itself), so the tokenizer's job is to produce argv,
+/// not a `cmd.exe` command string. Applying `cmd.exe` quoting on Windows would
+/// make the same scenario file split differently per runner and break the
+/// cross-platform matrix promise. A Windows path with backslashes therefore
+/// needs quoting like any other POSIX word: `spawn: {command: "'C:\\Program
+/// Files\\app.exe' --flag", split: posix}`. Documented in `SCHEMA.md` and the
+/// README.
+///
+/// A tokenization error is a [`PittyError::Process`] (exit code 3): the
+/// scenario named a command line the harness cannot turn into a process, and
+/// falling back to the whitespace split would re-introduce the silent
+/// mis-exec the author opted out of. Only [`SplitMode::Posix`] can fail;
+/// whitespace splitting has no invalid input.
+pub fn split_command(command: &str, mode: &SplitMode) -> Result<Vec<String>, PittyError> {
+    match mode.effective() {
+        EffectiveSplit::Whitespace => Ok(command.split_whitespace().map(String::from).collect()),
+        EffectiveSplit::Posix => shell_words::split(command).map_err(|e| {
+            PittyError::Process(format!("cannot parse spawn command `{command}`: {e}"))
+        }),
+    }
+}
+
 /// Put the freshly spawned child into the job, or reap it and fail.
 ///
 /// Takes and returns the child by value so a failed assignment cannot leave
@@ -612,5 +820,203 @@ impl Drop for PtySession {
     fn drop(&mut self) {
         // Best-effort cleanup; Drop cannot propagate errors.
         let _ = self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_split_mode_is_the_legacy_whitespace_rule() {
+        // The v1 compatibility contract forbids changing the meaning of an
+        // existing field, so a `spawn` that does not opt in must tokenize
+        // exactly as pitty 1.2.2 did. Verified byte-for-byte against the 1.2.2
+        // binary; see the CHANGELOG entry for why this is the default.
+        assert_eq!(SplitMode::default(), SplitMode::Whitespace);
+    }
+
+    #[test]
+    fn whitespace_mode_leaves_quotes_and_escapes_in_the_words() {
+        // The pre-#34 behavior, pinned: quotes are ordinary bytes, so a quoted
+        // argument is torn apart and the quote characters reach the child. A
+        // scenario that recorded a snapshot of that output must keep passing.
+        assert_eq!(
+            split_command("echo 'hello world'", &SplitMode::Whitespace).unwrap(),
+            vec!["echo", "'hello", "world'"]
+        );
+        assert_eq!(
+            split_command("echo \"a b\"", &SplitMode::Whitespace).unwrap(),
+            vec!["echo", "\"a", "b\""]
+        );
+        assert_eq!(
+            split_command(r"echo hello\ world", &SplitMode::Whitespace).unwrap(),
+            vec!["echo", r"hello\", "world"]
+        );
+    }
+
+    #[test]
+    fn whitespace_mode_never_fails_on_an_unterminated_quote() {
+        // Whitespace splitting has no invalid input: the command line that
+        // POSIX mode rejects must still tokenize (into mangled words) under the
+        // default, because rejecting it would tighten validation on a scenario
+        // that is valid under 1.0.
+        assert_eq!(
+            split_command("echo 'unterminated", &SplitMode::Whitespace).unwrap(),
+            vec!["echo", "'unterminated"]
+        );
+    }
+
+    #[test]
+    fn quoted_words_group_and_the_quotes_are_consumed() {
+        // Guarantees the fix for issue #34 case 1 at the tokenizer level, now
+        // behind `split: posix`: a quoted argument becomes ONE word whose text
+        // has no quote characters, so the child cannot print the quotes back
+        // out as literal bytes.
+        assert_eq!(
+            split_command("echo 'hello world'", &SplitMode::Posix).unwrap(),
+            vec!["echo", "hello world"]
+        );
+        assert_eq!(
+            split_command("echo \"hello world\"", &SplitMode::Posix).unwrap(),
+            vec!["echo", "hello world"]
+        );
+        assert_eq!(
+            split_command(r"echo hello\ world", &SplitMode::Posix).unwrap(),
+            vec!["echo", "hello world"]
+        );
+    }
+
+    #[test]
+    fn a_shell_one_liner_keeps_its_script_in_a_single_argument() {
+        // Guarantees the fix for issue #34 case 2 at the tokenizer level under
+        // `split: posix`: the program text handed to `sh -c` must stay one argv
+        // entry, otherwise `sh` runs `'exit` and reports an unrelated exit code.
+        assert_eq!(
+            split_command("sh -c 'exit 3'", &SplitMode::Posix).unwrap(),
+            vec!["sh", "-c", "exit 3"]
+        );
+    }
+
+    #[test]
+    fn unquoted_words_split_on_any_run_of_whitespace_in_both_modes() {
+        // The common case — no quotes, no backslashes — must tokenize
+        // identically under both rules, including repeated and mixed
+        // whitespace. This is what makes the opt-in safe to add to an existing
+        // scenario whose command happens to be quote-free.
+        for mode in [SplitMode::Whitespace, SplitMode::Posix] {
+            assert_eq!(
+                split_command("cargo  test\t--all", &mode).unwrap(),
+                vec!["cargo", "test", "--all"],
+                "mode {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_command_yields_no_words_in_both_modes() {
+        // `spawn` turns the empty word list into its "empty spawn command"
+        // process error; neither splitter may invent a program.
+        for mode in [SplitMode::Whitespace, SplitMode::Posix] {
+            assert!(
+                split_command("", &mode).unwrap().is_empty(),
+                "mode {mode:?}"
+            );
+            assert!(
+                split_command("   ", &mode).unwrap().is_empty(),
+                "mode {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmatched_quote_under_posix_is_a_process_error_not_a_panic_or_a_fallback() {
+        // Under the opt-in, a command line that cannot be tokenized must fail
+        // loudly as exit code 3 and name the offending command — never panic,
+        // and never fall back to the whitespace split, which would silently
+        // exec the wrong argv the author opted out of.
+        let err = split_command("echo 'unterminated", &SplitMode::Posix).unwrap_err();
+        assert_eq!(err.exit_code(), 3);
+        assert!(
+            err.message().contains("echo 'unterminated"),
+            "the error must quote the offending command line: {}",
+            err.message()
+        );
+    }
+
+    /// Deserialize a `split` value from the YAML that would follow the key.
+    fn split_mode(yaml: &str) -> SplitMode {
+        serde_norway::from_str(yaml).expect("any YAML value must deserialize as a split mode")
+    }
+
+    #[test]
+    fn split_mode_keywords_are_trimmed_and_case_folded() {
+        // Normalized like `key` and `source`.
+        assert_eq!(split_mode("\"  POSIX \""), SplitMode::Posix);
+        assert_eq!(split_mode("Whitespace"), SplitMode::Whitespace);
+        assert_eq!(split_mode("posix"), SplitMode::Posix);
+    }
+
+    #[test]
+    fn an_unknown_split_keyword_falls_back_to_the_default_and_warns() {
+        // The v1 contract, not a preference: `split` did not exist before this
+        // release, so `split: custom` is *accepted and ignored* by 1.2.2 and
+        // every earlier 1.x. Rejecting it here would tighten validation so a
+        // previously valid scenario becomes an error. Verified against the
+        // 1.2.2 binary, which runs this document to "status": "passed".
+        let mode = split_mode("custom");
+        assert_eq!(mode, SplitMode::Unknown("\"custom\"".to_string()));
+        // It must tokenize as the default — the same argv 1.2.2 produces.
+        assert_eq!(
+            split_command("echo 'hello world'", &mode).unwrap(),
+            vec!["echo", "'hello", "world'"]
+        );
+        // And it must still be visible, since it is not an error.
+        let warning = mode.warning().expect("an unknown keyword must warn");
+        assert!(
+            warning.contains("custom") && warning.contains("whitespace"),
+            "the warning must name the typo and the rule used: {warning}"
+        );
+        // A recognized keyword owes no warning.
+        assert!(SplitMode::Posix.warning().is_none());
+        assert!(SplitMode::Whitespace.warning().is_none());
+    }
+
+    #[test]
+    fn a_non_string_split_value_falls_back_to_the_default_and_warns_by_type() {
+        // The same contract clause one type away. `split` postdates 1.0, so
+        // 1.2.2 ignores the key whatever its *type* — verified against the
+        // binary for an integer, boolean, null, float, list and mapping, all of
+        // which run to "status": "passed" there. Requiring a string would
+        // reject the whole `spawn` map (the untagged enum fails to match) on a
+        // scenario every earlier 1.x runs.
+        for (yaml, expected_type) in [
+            ("42", "a number"),
+            ("1.5", "a number"),
+            ("true", "a boolean"),
+            ("null", "a null"),
+            ("[a, b]", "a list"),
+            ("{mode: posix}", "a mapping"),
+        ] {
+            let mode = split_mode(yaml);
+            assert_eq!(
+                mode,
+                SplitMode::Unknown(expected_type.to_string()),
+                "`split: {yaml}` must be carried as an unknown value"
+            );
+            // It tokenizes as the default, exactly as 1.2.2 does.
+            assert_eq!(
+                split_command("echo 'hello world'", &mode).unwrap(),
+                vec!["echo", "'hello", "world'"],
+                "`split: {yaml}` must tokenize with the default rule"
+            );
+            // The warning names the type rather than echoing the structure, so
+            // a large list or map cannot flood stderr.
+            let warning = mode.warning().expect("a non-string value must warn");
+            assert!(
+                warning.contains(expected_type) && warning.contains("whitespace"),
+                "the warning must name the type and the rule used: {warning}"
+            );
+        }
     }
 }

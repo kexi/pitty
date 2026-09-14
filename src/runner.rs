@@ -17,7 +17,7 @@ use crate::config::{Scenario, Source, Step};
 use crate::error::PittyError;
 use crate::pty::reader::OutputBufferHandle;
 use crate::pty::{Matcher, PtySession, Teardown};
-use crate::report::{Report, Status};
+use crate::report::{LogIdentity, Report, Status};
 use crate::workspace::{mask_secrets, Workspace};
 
 /// The global default timeout applied to `expect`/`expect_regex` when a step
@@ -47,6 +47,15 @@ pub struct RunOptions {
     /// `Send + Sync` so `RunOptions` stays shareable across threads if a future
     /// caller parallelizes scenarios.
     pub semantic_backend: Box<dyn SemanticBackend + Send + Sync>,
+    /// Extra identity the log file name is built from, beyond the scenario name.
+    ///
+    /// Carried here rather than added as a `run_scenario` parameter because the
+    /// two callers that can supply it (the CLI, which knows the scenario file,
+    /// and `run_matrix`, which knows the cell) already thread a `RunOptions`,
+    /// while `run_bench` and the library API have nothing to add — this is the
+    /// extension point this struct exists for. `None` means "name only", the
+    /// shape a direct `run_scenario` call gets.
+    pub log_identity: Option<LogIdentity>,
 }
 
 impl Default for RunOptions {
@@ -54,6 +63,7 @@ impl Default for RunOptions {
         RunOptions {
             update: false,
             semantic_backend: Box::new(LexicalBackend),
+            log_identity: None,
         }
     }
 }
@@ -85,12 +95,39 @@ pub fn run_scenario(
     base_dir: &Path,
     options: &RunOptions,
 ) -> Result<Report, PittyError> {
+    run_scenario_logged(scenario, base_dir, options, None)
+}
+
+/// [`run_scenario`], with the log identity supplied directly by the caller.
+///
+/// `identity` overrides `options.log_identity` for this one run. It exists for
+/// `run_matrix`, which runs many cells through one `RunOptions` and must vary
+/// only the log path between them: `RunOptions` owns a non-`Clone` backend trait
+/// object, so a per-cell clone of it is not available to carry the difference.
+pub(crate) fn run_scenario_logged(
+    scenario: &Scenario,
+    base_dir: &Path,
+    options: &RunOptions,
+    identity: Option<LogIdentity>,
+) -> Result<Report, PittyError> {
     let start = Instant::now();
+    // Capture the log anchor *before* any child is spawned. The log is written
+    // at the end of the run, by which time the scenario's own process may have
+    // planted symlinks under `base_dir`; a descriptor taken now names the
+    // directory object that existed beforehand, which is the entire basis of
+    // `safepath`'s anti-swap property. Taken before `Workspace::prepare` so it
+    // precedes every side effect of the run.
+    //
+    // Anchored on `base_dir` (the scenario file's directory), deliberately *not*
+    // on the workspace cwd: under `workspace.temp: true` those are different
+    // trees, and `logs/` belongs to the scenario file's directory.
+    let log_anchor = crate::report::LogAnchor::capture(base_dir);
     let workspace = Workspace::prepare(scenario, base_dir)?;
     let mut state = RunState {
         session: None,
         snapshots: FileSnapshots::new(),
         assertions: Vec::new(),
+        retired_output: Vec::new(),
     };
 
     let mut run_error: Option<PittyError> = None;
@@ -105,8 +142,22 @@ pub fn run_scenario(
             // `state.session` so the hard-fault path below still writes its
             // output and the partial assertion rows to the log (a second
             // `shutdown` on it is a no-op).
-            if let Some(previous) = state.session.as_mut() {
-                if let Err(e) = classify_teardown(previous.shutdown()) {
+            if let Some(mut previous) = state.session.take() {
+                let teardown = classify_teardown(previous.shutdown());
+                // Snapshot unconditionally, and only once. Taken *after*
+                // `shutdown()` so the child's final bytes are in the buffer.
+                //
+                // Why the session is `take`n rather than borrowed: it used to
+                // stay in `state.session` so a failing spawn below could still
+                // log it — but then the final teardown snapshotted the very same
+                // buffer a second time and the log showed one session twice. It
+                // is moved out here, its output preserved in `retired_output`
+                // either way, so exactly one copy reaches the log whether the
+                // next spawn succeeds or fails.
+                state
+                    .retired_output
+                    .push(previous.output().snapshot_string());
+                if let Err(e) = teardown {
                     run_error = Some(e);
                     break;
                 }
@@ -131,6 +182,53 @@ pub fn run_scenario(
         }
     }
 
+    // Stop the clock before teardown begins.
+    //
+    // `duration_ms` is a published report field, and in 1.2.2 it measured the
+    // scenario's own execution — the clock was read before the session was torn
+    // down. Moving teardown earlier (so the log records the true final status)
+    // silently folded cleanup into that number: a scenario leaving `bash` alive
+    // went from ~3ms to ~64ms, and a stalled ConPTY teardown can add seconds.
+    // `BenchReport` derives its statistics straight from this, so every recorded
+    // threshold and historical comparison would shift.
+    //
+    // COMPATIBILITY.md treats a change in a report field's meaning as a major
+    // change, so the value is captured here and the ordering below is unaffected:
+    // the log still sees the post-teardown status and the drained output.
+    let scenario_duration_ms = start.elapsed().as_millis();
+
+    // Tear down the session BEFORE assembling the log, so the log records the
+    // run's true final state.
+    //
+    // Why the order matters: `shutdown()` drains the child's remaining output,
+    // and teardown can itself fail (a leaked process tree is a process error
+    // even when every assertion passed). Logging first meant a run that ended in
+    // a hard fault was written as `# status: Passed`, and a chatty child's tail
+    // never reached the file — a diagnostic that misleads whoever reads it during
+    // an incident is worse than no diagnostic at all.
+    //
+    // The session is taken out of `state` here, so `collect_output` below reads
+    // the drained buffer from `retired_output` rather than a live session; that
+    // is why the shutdown pushes its snapshot there.
+    if let Some(mut session) = state.session.take() {
+        let teardown = classify_teardown(session.shutdown());
+        // Snapshot after the drain, so the final bytes are in the log.
+        state
+            .retired_output
+            .push(session.output().snapshot_string());
+        // A process failure outranks whatever the run already recorded (the
+        // established severity order), so the earlier error is folded into
+        // the message rather than the other way round.
+        if let Err(teardown) = teardown {
+            run_error = Some(match run_error.take() {
+                Some(earlier) => {
+                    PittyError::Process(format!("{}; earlier error: {earlier}", teardown.message()))
+                }
+                None => teardown,
+            });
+        }
+    }
+
     // Invariant: a `Status` describes only the pass/fail of a *completed* run.
     // A hard fault (process/scenario) is reported by returning `Err` below, and
     // its exit-code class lives in `PittyError::exit_code` — the single source
@@ -146,10 +244,14 @@ pub fn run_scenario(
         Status::Failed
     };
 
+    // Snapshot every session's output before `state.assertions` is moved into
+    // the report, so the log body is assembled while `state` is still whole.
+    let output = collect_output(&state);
+
     let mut report = Report {
         scenario: scenario.name.clone(),
         status,
-        duration_ms: start.elapsed().as_millis(),
+        duration_ms: scenario_duration_ms,
         assertions: state.assertions,
     };
     // Mask secrets in the report before it leaves the runner. Assertion
@@ -161,35 +263,58 @@ pub fn run_scenario(
 
     // Write the per-scenario log on a best-effort basis; a logging failure
     // must not change the run's verdict.
-    if let Some(session) = &state.session {
-        let output = session.output().snapshot_string();
-        let _ = crate::report::write_log(
-            base_dir,
-            &scenario.name,
-            &output,
-            &report,
-            workspace.secrets(),
+    //
+    // Written unconditionally, not only when a session exists: a spawn-less
+    // scenario still produces assertion rows and can still fail, and its report
+    // is exactly as worth keeping on disk as a spawned run's. The output section
+    // is then the empty-run marker rather than terminal text.
+    let identity = identity
+        .or_else(|| options.log_identity.clone())
+        .unwrap_or_else(|| LogIdentity::new(&scenario.name))
+        // The scenario name always comes from the scenario actually run. A matrix
+        // cell reuses the base identity supplied by the CLI, and a stale name in
+        // it would label every cell's log with the wrong scenario.
+        .with_name(&scenario.name);
+    // A log-write failure warns on stderr but does not change the verdict.
+    //
+    // Why not fail the run: the log is a diagnostics *sink*, not an assertion.
+    // Turning a full disk or a read-only `logs/` into a red test would report a
+    // failure the scenario under test did not have, and in CI that misdirects
+    // the investigation to the program under test instead of the runner's
+    // environment. The verdict stays a statement about the scenario.
+    //
+    // Why not stay silent either (the previous `let _ =`): that lost the entire
+    // class — permissions, full disk, a name too long for the filesystem — so a
+    // developer opening `logs/` after a failure found nothing there and no
+    // explanation for it. A warning is the honest middle: the run's verdict is
+    // untouched, but the missing artifact is accounted for.
+    //
+    // stderr specifically, never stdout: `--json` consumers parse stdout, and a
+    // warning mixed into it would corrupt the report. This matches where the
+    // GitHub annotations write.
+    // The hard fault, if any, is known by now: teardown ran above. Passing it
+    // in is what lets the log say `Errored` instead of claiming a failed run
+    // passed.
+    let fault = run_error.as_ref().map(|e| e.to_string());
+    if let Err(e) = crate::report::write_log(
+        base_dir,
+        &log_anchor,
+        &identity,
+        &output,
+        &report,
+        fault.as_deref(),
+        workspace.secrets(),
+    ) {
+        // Mask the warning like every other diagnostic that leaves the runner:
+        // the scenario name is author-supplied and the error embeds the log path
+        // built from it, so a secret used in a name would otherwise surface here
+        // after being carefully masked everywhere else.
+        let secrets = workspace.secrets();
+        let warning = format!(
+            "warning: could not write the log for scenario '{}': {e}",
+            scenario.name
         );
-    }
-
-    // Tear down the session explicitly and classify the outcome. A teardown
-    // that leaves the child or its tree alive pollutes the environment for
-    // whatever runs next, so it is a process error even when every assertion
-    // passed (the log is already written above). A console host that is merely
-    // slow to release its handles after the tree died changes nothing about
-    // the run and is only reported.
-    if let Some(mut session) = state.session.take() {
-        // A process failure outranks whatever the run already recorded (the
-        // established severity order), so the earlier error is folded into
-        // the message rather than the other way round.
-        if let Err(teardown) = classify_teardown(session.shutdown()) {
-            run_error = Some(match run_error.take() {
-                Some(earlier) => {
-                    PittyError::Process(format!("{}; earlier error: {earlier}", teardown.message()))
-                }
-                None => teardown,
-            });
-        }
+        eprintln!("{}", mask_secrets(&warning, secrets));
     }
 
     match run_error {
@@ -206,6 +331,14 @@ struct RunState {
     snapshots: FileSnapshots,
     /// Accumulated assertion rows.
     assertions: Vec<AssertionResult>,
+    /// Output buffers of the sessions already retired by a later `spawn`.
+    ///
+    /// Each `spawn` builds a fresh `PtySession` with its own buffer and drops the
+    /// previous one, so the retired buffer is the only record of what that
+    /// process printed. It is snapshotted at retirement into this vector and
+    /// concatenated with the live session's buffer when the log is written, so a
+    /// multi-spawn log carries every session's output rather than just the last.
+    retired_output: Vec<String>,
 }
 
 /// Execute one step, mutating state and recording assertions.
@@ -234,7 +367,13 @@ fn execute_step(
             // The previous session (if any) was already retired and the file
             // baselines re-primed by `run_scenario` before this step ran.
             let command = workspace.expand(&spec.command);
-            state.session = Some(PtySession::spawn(&command, &cwd, &env)?);
+            // An unrecognized `split` keyword is not fatal (it must stay as
+            // runnable as it is on a pitty that predates the field), so this
+            // warning is the only signal the author gets that it was ignored.
+            if let Some(warning) = spec.split.warning() {
+                eprintln!("{}", mask_secrets(&warning, workspace.secrets()));
+            }
+            state.session = Some(PtySession::spawn(&command, &spec.split, &cwd, &env)?);
             Ok(())
         }
         Step::Send(text) => {
@@ -411,8 +550,48 @@ fn execute_step(
             // path is a Scenario error (exit 2) rather than a silent escape. A
             // failed resolution aborts the step as a hard error (see
             // resolve_write_path), matching the one-of/unknown-source class.
-            let path = workspace.resolve_write_path(&spec.file)?;
-            let result = assert::snapshot::check(&output, &path, spec.raw, options.update);
+            // The resolver returns the validated destination: the component
+            // sequence containment actually approved, plus the workspace
+            // directory descriptor captured before the child was spawned. The
+            // recorder walks only that, so it cannot create or write anywhere
+            // containment did not sanction, nor follow a workspace path that a
+            // child renamed and replaced with a symlink mid-run.
+            // Two refusal classes, kept distinct because a consumer can see the
+            // difference. `?` propagates the *scenario* errors — a path that
+            // escapes the workspace however the filesystem is arranged — as
+            // exit 2 with no report, which is what 1.2.2 did for them.
+            //
+            // A path the *filesystem* would have refused (ENOTDIR across a
+            // non-directory, ELOOP on an over-long chain) is not that: 1.2.2
+            // attempted the write, and the OS error surfaced as a failed
+            // snapshot assertion — exit 1, with a full JSON report carrying the
+            // message. pitty now refuses before opening anything so the victim
+            // is never truncated, but that is a change in *when* the refusal
+            // happens, not in what it is. Reporting it here keeps both the
+            // exit-code and the report-JSON contracts intact; raising it as a
+            // scenario error instead silently deleted the report a pipeline
+            // parses, and dropped the scenario's row from `pitty run <dir>`.
+            // Which question to ask depends on whether this run will create the
+            // snapshot's missing parents. Under `--update` a `..` across an
+            // absent component is sound (the component is about to exist, and
+            // 1.2.2 recorded such paths); on a read it never becomes sound, and
+            // eliding it let an unreachable path pass by comparing against a
+            // different file.
+            let access = if options.update {
+                crate::workspace::SnapshotAccess::Record
+            } else {
+                crate::workspace::SnapshotAccess::Verify
+            };
+            let target = match workspace.resolve_write_path(&spec.file, access)? {
+                Ok(target) => target,
+                Err(unresolvable) => {
+                    state
+                        .assertions
+                        .push(AssertionResult::fail(&label, unresolvable.into_message()));
+                    return Ok(());
+                }
+            };
+            let result = assert::snapshot::check(&output, &target, spec.raw, options.update);
             state.assertions.push(snapshot_result(&label, result));
             Ok(())
         }
@@ -530,6 +709,43 @@ fn prime_snapshots(scenario: &Scenario, workspace: &Workspace, snapshots: &mut F
             let path = workspace.resolve_path(&spec.path);
             snapshots.capture(&path);
         }
+    }
+}
+
+/// The marker the log carries in place of terminal output for a spawn-less run.
+///
+/// An explicit marker rather than an empty section so the log distinguishes
+/// "this scenario never started a process" from "the process printed nothing",
+/// which look identical to a reader otherwise.
+const NO_SPAWN_OUTPUT: &str = "(no process spawned)";
+
+/// Join every session's output into the single block the log records.
+///
+/// Sessions are emitted in spawn order — the buffers retired by each later
+/// `spawn`, then the live one — each under a `--- session N ---` banner so a
+/// multi-spawn log stays attributable to the process that produced each chunk.
+/// A single-session run gets no banner, keeping the common log's shape unchanged.
+fn collect_output(state: &RunState) -> String {
+    let live = state
+        .session
+        .as_ref()
+        .map(|session| session.output().snapshot_string());
+    let sessions: Vec<&str> = state
+        .retired_output
+        .iter()
+        .map(String::as_str)
+        .chain(live.as_deref())
+        .collect();
+
+    match sessions.len() {
+        0 => NO_SPAWN_OUTPUT.to_string(),
+        1 => sessions[0].to_string(),
+        _ => sessions
+            .iter()
+            .enumerate()
+            .map(|(i, output)| format!("--- session {} ---\n{output}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
@@ -690,6 +906,78 @@ steps:
         assert_eq!(report.status, Status::Passed);
         assert_eq!(report.assertions.len(), 2);
         assert!(report.assertions.iter().all(|a| a.passed));
+    }
+
+    #[test]
+    fn spawn_less_run_still_writes_its_log() {
+        // Issue #35 defect 2: a scenario that never spawns still produces
+        // assertion rows, and a failing one is exactly the run whose record is
+        // worth keeping. The log must exist and carry the failing row plus the
+        // explicit no-process marker in place of terminal output.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), b"actual").unwrap();
+        let yaml = r#"
+name: file-only-no-log
+steps:
+  - expect_file_contains:
+      path: f.txt
+      contains: nope-this-fails
+"#;
+        let scenario = Scenario::from_yaml(yaml).unwrap();
+        let report = run_scenario(&scenario, dir.path(), &RunOptions::default()).unwrap();
+        assert_eq!(report.status, Status::Failed);
+
+        let log = std::fs::read_to_string(dir.path().join("logs/file-only-no-log.log"))
+            .expect("a spawn-less run must still leave a log");
+        assert!(log.contains(NO_SPAWN_OUTPUT), "log:\n{log}");
+        assert!(log.contains("[FAIL] expect_file_contains"), "log:\n{log}");
+    }
+
+    #[test]
+    fn collect_output_marks_a_run_that_never_spawned() {
+        // With no session at all the output block is the explicit marker, so a
+        // reader can tell "never started" from "printed nothing".
+        let state = RunState {
+            session: None,
+            snapshots: FileSnapshots::new(),
+            assertions: Vec::new(),
+            retired_output: Vec::new(),
+        };
+        assert_eq!(collect_output(&state), NO_SPAWN_OUTPUT);
+    }
+
+    #[test]
+    fn collect_output_keeps_every_retired_session_in_spawn_order() {
+        // Issue #35 defect 1: the buffers of sessions retired by a later spawn
+        // must all reach the log, in spawn order, each attributed to its session.
+        let state = RunState {
+            session: None,
+            snapshots: FileSnapshots::new(),
+            assertions: Vec::new(),
+            retired_output: vec!["first-process".to_string(), "second-process".to_string()],
+        };
+        let output = collect_output(&state);
+        assert!(output.contains("first-process"), "output:\n{output}");
+        assert!(output.contains("second-process"), "output:\n{output}");
+        assert!(
+            output.find("first-process") < output.find("second-process"),
+            "sessions must stay in spawn order:\n{output}"
+        );
+        assert!(output.contains("--- session 1 ---"), "output:\n{output}");
+        assert!(output.contains("--- session 2 ---"), "output:\n{output}");
+    }
+
+    #[test]
+    fn collect_output_leaves_a_single_session_unbannered() {
+        // The common single-spawn log keeps its existing shape: raw output with
+        // no session banner.
+        let state = RunState {
+            session: None,
+            snapshots: FileSnapshots::new(),
+            assertions: Vec::new(),
+            retired_output: vec!["only-one".to_string()],
+        };
+        assert_eq!(collect_output(&state), "only-one");
     }
 
     #[test]
@@ -881,6 +1169,62 @@ steps:
         assert!(
             !outside.exists(),
             "snapshot must not be written outside the workspace"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_the_filesystem_refuses_fails_the_assertion_and_still_reports() {
+        // (Contract) The two refusal classes are not interchangeable, and a
+        // consumer can tell them apart.
+        //
+        // `../escape.snap` is wrong whatever is on disk, so it stays a scenario
+        // error: exit 2, no report (pinned by the test above). But a path the
+        // *filesystem* would refuse — here `..` across a regular file, which the
+        // kernel answers with ENOTDIR — was a failed snapshot assertion in
+        // 1.2.2: exit 1, with a full JSON report carrying the message. Verified
+        // by running 1.2.2.
+        //
+        // pitty now refuses before opening anything, so the victim is never
+        // truncated. That is a change in *when* the refusal is detected, not in
+        // what it is, and it must not cost the report: a pipeline parses stdout
+        // for per-assertion results, and `pitty run <dir>` needs a row for this
+        // scenario. Raising it as a scenario error deleted both.
+        //
+        // This asserts the observable contract (a report exists, with a failed
+        // assertion) rather than the internal error type, because that is what a
+        // consumer actually depends on.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("blocker"), "a regular file").unwrap();
+        std::fs::write(dir.path().join("victim.snap"), "ORIGINAL").unwrap();
+        let yaml = format!(
+            "name: x\nsteps:\n  - spawn: \"{}\"\n  - expect_snapshot:\n      file: blocker/../victim.snap\n",
+            success_command()
+        );
+        let scenario = Scenario::from_yaml(&yaml).unwrap();
+        let options = RunOptions {
+            update: true,
+            ..RunOptions::default()
+        };
+
+        // A report, not an Err: this is an assertion failure, not a malformed
+        // scenario.
+        let report = run_scenario(&scenario, dir.path(), &options)
+            .expect("a filesystem-refused path must still produce a report");
+        let snapshot_step = report
+            .assertions
+            .iter()
+            .find(|a| a.step.contains("expect_snapshot"))
+            .expect("the snapshot step must appear in the report");
+        assert!(
+            !snapshot_step.passed,
+            "the refused path must fail the assertion rather than pass"
+        );
+        // And the data-loss guarantee the whole fix exists for.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("victim.snap")).unwrap(),
+            "ORIGINAL",
+            "a path the kernel refuses must never reach a real file"
         );
     }
 

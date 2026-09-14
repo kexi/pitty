@@ -3,9 +3,11 @@
 //! Injection method (design "case A"): for each cell — a concrete assignment of
 //! one value to every axis — clone the scenario and overwrite the same-named
 //! entries in `variables` with the cell's values as [`VarSpec::Plain`], then call
-//! the unmodified [`run_scenario`]. The scenario author writes `${axis}` wherever
-//! each value should land (e.g. `spawn: "${command} --region ${region}"`), so the
-//! existing `${var}` expansion resolves each cell without any runner change.
+//! the unmodified [`run_scenario`](crate::run_scenario) body. The scenario author
+//! writes `${axis}` wherever each value should land (e.g.
+//! `spawn: "${command} --region ${region}"`), so the existing `${var}` expansion
+//! resolves each cell without any runner change. Only the log identity varies
+//! per cell, so each cell's diagnostics land in their own file.
 //! Cells run sequentially to honor the runner's no-snapshot-race contract.
 
 use std::collections::BTreeMap;
@@ -16,8 +18,8 @@ use serde::Serialize;
 use crate::cli::aggregate_exit_codes;
 use crate::config::{Scenario, VarSpec};
 use crate::error::PittyError;
-use crate::report::{status_exit_code, status_verdict_label, Report, Status};
-use crate::runner::{run_scenario, RunOptions};
+use crate::report::{status_exit_code, status_verdict_label, LogIdentity, Report, Status};
+use crate::runner::{run_scenario_logged, RunOptions};
 
 /// The default maximum number of cells a matrix may expand to before it is
 /// rejected as a Scenario error.
@@ -218,7 +220,21 @@ pub fn run_matrix(
     let mut cells = Vec::with_capacity(combos.len());
     for coords in combos {
         let cell_scenario = inject_cell_values(scenario, &coords);
-        let report = run_scenario(&cell_scenario, base_dir, options)?;
+        // Every cell runs the same file under the same `name:`, so the cell's
+        // coordinates are the only thing that tells their logs apart. Stamp them
+        // onto the base identity (which may already carry the scenario file) so
+        // each cell writes its own log instead of overwriting the previous one's.
+        //
+        // Why the identity is passed alongside `options` rather than folded into
+        // a per-cell clone of it: `RunOptions` owns a non-`Clone` backend trait
+        // object, so rebuilding it here would have to substitute a default
+        // backend and would silently drop whatever the caller injected.
+        let identity = options
+            .log_identity
+            .clone()
+            .unwrap_or_else(|| LogIdentity::new(&scenario.name))
+            .with_cell(coords.clone());
+        let report = run_scenario_logged(&cell_scenario, base_dir, options, Some(identity))?;
         cells.push(MatrixCell { coords, report });
     }
 

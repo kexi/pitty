@@ -12,7 +12,8 @@ use clap::{Parser, Subcommand};
 use crate::config::Scenario;
 use crate::error::{severity, PittyError};
 use crate::github::{self, github_enabled};
-use crate::runner::{run_scenario, RunOptions};
+use crate::report::LogIdentity;
+use crate::runner::{run_scenario_logged, RunOptions};
 
 /// Embedded scaffold scenario, copied by `init`.
 const HELLO_SCENARIO: &str = include_str!("../assets/scenarios/hello.yaml");
@@ -239,7 +240,16 @@ fn run_one(file: &Path, options: &RunOptions, github: bool) -> u8 {
     // Relative paths in the scenario resolve against its own directory.
     let base_dir = file.parent().unwrap_or_else(|| Path::new("."));
 
-    match run_scenario(&scenario, base_dir, options) {
+    // Name the log after the scenario *file* as well as its `name:`. Nothing
+    // enforces `name:` unique across files, and a directory run executes every
+    // file into one `logs/` directory, so two copies of a scenario would
+    // otherwise write to the same path and the later run would destroy the
+    // earlier one's diagnostics. Passed alongside `options` rather than folded
+    // into a clone of it because `RunOptions` owns a non-`Clone` backend trait
+    // object (see `run_scenario_logged`).
+    let identity = LogIdentity::new(&scenario.name).with_file(file);
+
+    match run_scenario_logged(&scenario, base_dir, options, Some(identity)) {
         Ok(report) => {
             println!("{}", report.to_json());
             // GitHub output is a side effect: emit the summary/annotations from
@@ -348,7 +358,15 @@ fn cmd_matrix(file: &Path, json: bool, no_fail: bool, github: bool) -> u8 {
     // whose snapshot is absent therefore fails (`not recorded; rerun with
     // --update`); record snapshots with `pitty run --update` first, then gate
     // with `pitty matrix`.
-    match crate::matrix::run_matrix(&scenario, base_dir, &RunOptions::default()) {
+    // The file stem joins the per-cell coordinates in each cell's log name, for
+    // the same reason `run_one` supplies it: a matrix file shares `logs/` with
+    // every other scenario in the directory.
+    let options = RunOptions {
+        log_identity: Some(LogIdentity::new(&scenario.name).with_file(file)),
+        ..RunOptions::default()
+    };
+
+    match crate::matrix::run_matrix(&scenario, base_dir, &options) {
         Ok(report) => {
             if json {
                 println!("{}", report.to_json());
@@ -424,7 +442,19 @@ fn cmd_bench(file: &Path, runs: usize, warmup: usize, json: bool, github: bool) 
     // different output, and the recorded "golden" would just be whichever run
     // happened to write last — noise, not a baseline. A run whose snapshot is
     // absent therefore fails; record with `pitty run --update` first.
-    match crate::bench::run_bench(&scenario, base_dir, &RunOptions::default(), runs, warmup) {
+    // Stamp the scenario file, exactly as `run_one` does. Every repetition
+    // shares this one identity, so the bench writes a single log (the last
+    // iteration's) rather than one per run. Why it must match `run_one`'s
+    // identity rather than being merely self-consistent: benching a file and
+    // then running it would otherwise claim two different logs for the same
+    // scenario, and `logs/<scenario>.log` would be whichever command was used
+    // last — the stale-log trap this naming scheme exists to close.
+    let options = RunOptions {
+        log_identity: Some(LogIdentity::new(&scenario.name).with_file(file)),
+        ..RunOptions::default()
+    };
+
+    match crate::bench::run_bench(&scenario, base_dir, &options, runs, warmup) {
         Ok(report) => {
             if json {
                 println!("{}", report.to_json());
@@ -505,6 +535,37 @@ mod tests {
         write_scenario(d, "b.yaml", "name: bad\nsteps:\n  - send: hi\n"); // exit 2
         write_scenario(d, "c.yaml", &exists_scenario("present.txt"));
         assert_eq!(cmd_run(d, &RunOptions::default(), false), 2);
+    }
+
+    #[test]
+    fn cmd_run_directory_keeps_a_log_per_file_when_names_collide() {
+        // Issue #36: two scenario files declaring the same `name:` must each
+        // leave their own log. Both run and both are reported, so both must be
+        // reconstructable from disk — the later file must not destroy the
+        // earlier one's record.
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        fs::write(d.join("present.txt"), b"x").unwrap();
+        // Same `name:`, different assertion target, so their logs differ in
+        // content as well as in path.
+        write_scenario(
+            d,
+            "a.yaml",
+            "name: same-name\nsteps:\n  - expect_file_exists:\n      path: present.txt\n",
+        );
+        write_scenario(
+            d,
+            "b.yaml",
+            "name: same-name\nsteps:\n  - expect_file_exists:\n      path: missing.txt\n",
+        );
+        assert_eq!(cmd_run(d, &RunOptions::default(), false), 1);
+
+        let from_a = fs::read_to_string(d.join("logs/a.same-name.log"))
+            .expect("a.yaml must keep its own log");
+        let from_b = fs::read_to_string(d.join("logs/b.same-name.log"))
+            .expect("b.yaml must keep its own log");
+        assert!(from_a.contains("[PASS] expect_file_exists"), "{from_a}");
+        assert!(from_b.contains("[FAIL] expect_file_exists"), "{from_b}");
     }
 
     #[test]

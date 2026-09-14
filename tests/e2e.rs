@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use pitty::bench::run_bench;
 use pitty::config::Scenario;
 use pitty::matrix::run_matrix;
-use pitty::pty::{ExpectOutcome, Matcher, PtySession, Teardown, SHUTDOWN_GRACE};
+use pitty::pty::{ExpectOutcome, Matcher, PtySession, SplitMode, Teardown, SHUTDOWN_GRACE};
 use pitty::report::Status;
 use pitty::run_scenario;
 use pitty::runner::RunOptions;
@@ -129,8 +129,8 @@ fn assert_clean_bounded_shutdown(session: &mut PtySession) {
 fn shutdown_is_bounded_while_child_is_exiting() {
     let _pty = pty_lock();
     let dir = tempfile::tempdir().unwrap();
-    let mut session =
-        PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
+    let mut session = PtySession::spawn("bash", &SplitMode::default(), dir.path(), &[])
+        .expect("bash must spawn inside a PTY");
     session.send_line("exit").expect("send must succeed");
 
     assert_clean_bounded_shutdown(&mut session);
@@ -144,8 +144,8 @@ fn shutdown_is_bounded_while_child_is_exiting() {
 fn shutdown_kills_an_idle_shell_promptly() {
     let _pty = pty_lock();
     let dir = tempfile::tempdir().unwrap();
-    let mut session =
-        PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
+    let mut session = PtySession::spawn("bash", &SplitMode::default(), dir.path(), &[])
+        .expect("bash must spawn inside a PTY");
     wait_until_shell_is_up(&mut session);
 
     assert_clean_bounded_shutdown(&mut session);
@@ -167,8 +167,8 @@ fn shutdown_kills_an_idle_shell_promptly() {
 fn shutdown_sweeps_the_process_group_of_an_exited_child() {
     let _pty = pty_lock();
     let dir = tempfile::tempdir().unwrap();
-    let mut session =
-        PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
+    let mut session = PtySession::spawn("bash", &SplitMode::default(), dir.path(), &[])
+        .expect("bash must spawn inside a PTY");
     // `set +m` turns job control off so the sleeper stays in bash's own
     // group; `trap '' HUP` is inherited across exec; `exit` then leaves the
     // sleeper behind, still holding the PTY.
@@ -231,8 +231,8 @@ fn shutdown_kills_grandchildren_on_windows() {
     let _pty = pty_lock();
     let dir = tempfile::tempdir().unwrap();
     let heartbeat = dir.path().join("heartbeat");
-    let mut session =
-        PtySession::spawn("bash", dir.path(), &[]).expect("bash must spawn inside a PTY");
+    let mut session = PtySession::spawn("bash", &SplitMode::default(), dir.path(), &[])
+        .expect("bash must spawn inside a PTY");
     // The heartbeat write is the builtin `printf`, not an external `date`, so
     // it cannot silently fail on a minimal PATH and leave an empty file that
     // would compare equal before and after.
@@ -366,6 +366,245 @@ steps:
     assert_eq!(err.exit_code(), 3);
 }
 
+/// Issue #34 case 1: a quoted argument must reach the child as ONE argument
+/// with the quotes consumed, so the quote characters never appear in the
+/// terminal output.
+///
+/// Why `expect_not` rather than `expect: "hello world"`: the bug's defining
+/// property is that `contains: "hello world"` PASSES while the output is
+/// wrong (`'hello world'` still contains the substring), so a positive
+/// assertion cannot distinguish fixed from broken. Asserting the absence of
+/// the literal quote is what fails before the fix and passes after.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn quoted_spawn_argument_does_not_leak_quote_characters_into_output() {
+    let _pty = pty_lock();
+    let yaml = r#"
+name: quote-demo
+workspace:
+  temp: true
+steps:
+  - spawn:
+      command: "echo 'hello world'"
+      split: posix
+  - expect:
+      contains: "hello world"
+      timeout: 10s
+  - expect_not:
+      contains: "'"
+"#;
+    let scenario = Scenario::from_yaml(yaml).unwrap();
+    let report = run_scenario(&scenario, Path::new("."), &RunOptions::default())
+        .expect("the scenario must run to a verdict");
+    assert_eq!(
+        report.status,
+        Status::Passed,
+        "echo must print `hello world` with no quote characters: {report:?}"
+    );
+}
+
+/// An unrecognized `split` keyword must run, not error — the way every pitty
+/// released before the field existed runs it.
+///
+/// Direction one of the two-way compatibility check. Verified against the 1.2.2
+/// binary, which reports `"status": "passed"` for this exact document because
+/// nested unknown fields are deliberately lenient (`COMPATIBILITY.md`). An
+/// earlier revision of this feature rejected it, which was the same class of
+/// contract break as #34 reached through the fix for #34.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn an_unknown_split_keyword_runs_under_the_default_rule() {
+    let _pty = pty_lock();
+    let yaml = r#"
+name: unknown-split
+workspace:
+  temp: true
+steps:
+  - spawn:
+      command: "echo 'hello world'"
+      split: custom
+  - expect:
+      contains: "'hello world'"
+      timeout: 10s
+"#;
+    let scenario = Scenario::from_yaml(yaml).unwrap();
+    let report = run_scenario(&scenario, Path::new("."), &RunOptions::default())
+        .expect("an unknown split keyword must not be a scenario error");
+    assert_eq!(
+        report.status,
+        Status::Passed,
+        "an unrecognized `split` must fall back to the default rule, as 1.2.2 does: {report:?}"
+    );
+}
+
+/// A `split` value of any *type* must run under the default rule, not just an
+/// unrecognized string.
+///
+/// `SpawnSpecRaw` is untagged, so a type mismatch at `split` fails the whole
+/// variant match and rejects the entire `spawn` map — with a message that never
+/// mentions `split`. 1.2.2 ignores the key whatever its type (verified against
+/// the binary for each of these), so rejecting them would be the same contract
+/// break as rejecting an unknown keyword, one type away.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_non_string_split_value_runs_under_the_default_rule() {
+    let _pty = pty_lock();
+    for value in ["42", "true", "null", "[a, b]", "{mode: posix}"] {
+        let yaml = format!(
+            r#"
+name: split-type
+workspace:
+  temp: true
+steps:
+  - spawn:
+      command: "echo 'hello world'"
+      split: {value}
+  - expect:
+      contains: "'hello world'"
+      timeout: 10s
+"#
+        );
+        let scenario = Scenario::from_yaml(&yaml)
+            .unwrap_or_else(|e| panic!("`split: {value}` must parse, but: {e}"));
+        let report = run_scenario(&scenario, Path::new("."), &RunOptions::default())
+            .unwrap_or_else(|e| panic!("`split: {value}` must not be a scenario error: {e}"));
+        assert_eq!(
+            report.status,
+            Status::Passed,
+            "`split: {value}` must fall back to the default rule, as 1.2.2 does: {report:?}"
+        );
+    }
+}
+
+/// The v1 compatibility guarantee, end to end: a `spawn` that does not opt in
+/// must tokenize exactly as pitty 1.2.2 did.
+///
+/// This is the regression the `split` field exists to prevent. Making POSIX
+/// rules unconditional broke a real, contract-valid scenario: `echo 'hello
+/// world'` recorded on 1.2.2 has the literal bytes `'hello world'` in its
+/// snapshot, and the unconditional tokenizer produced `hello world`, failing
+/// the scenario on a patch upgrade. Asserting the quote characters are still
+/// present is what fails if the default ever flips again.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn the_default_spawn_tokenization_still_leaks_quote_characters_like_1_2_2() {
+    let _pty = pty_lock();
+    let yaml = r#"
+name: legacy-quote-demo
+workspace:
+  temp: true
+steps:
+  - spawn: "echo 'hello world'"
+  - expect:
+      contains: "'hello world'"
+      timeout: 10s
+"#;
+    let scenario = Scenario::from_yaml(yaml).unwrap();
+    let report = run_scenario(&scenario, Path::new("."), &RunOptions::default())
+        .expect("the scenario must run to a verdict");
+    assert_eq!(
+        report.status,
+        Status::Passed,
+        "without `split: posix` the quotes must still reach the child verbatim: {report:?}"
+    );
+}
+
+/// The default must not tighten validation either: a command line that
+/// `split: posix` rejects has to keep running under the default rule.
+///
+/// `COMPATIBILITY.md` forbids turning a previously valid scenario into an
+/// error within `1.x`, and `echo 'unterminated` is such a scenario — it ran
+/// (splitting into mangled words) on every release before the opt-in existed.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn the_default_spawn_tokenization_accepts_an_unterminated_quote() {
+    let _pty = pty_lock();
+    let yaml = r#"
+name: legacy-bad-quote
+workspace:
+  temp: true
+steps:
+  - spawn: "echo 'unterminated"
+  - expect:
+      contains: "unterminated"
+      timeout: 10s
+"#;
+    let scenario = Scenario::from_yaml(yaml).unwrap();
+    let report = run_scenario(&scenario, Path::new("."), &RunOptions::default())
+        .expect("the default rule must not reject a command POSIX rules cannot parse");
+    assert_eq!(
+        report.status,
+        Status::Passed,
+        "an unterminated quote must still spawn under the default rule: {report:?}"
+    );
+}
+
+/// Issue #34 case 2, under `split: posix`: `sh -c '<script>'` must hand the
+/// whole script to `sh` as one argument, so the child's exit code is the
+/// script's own.
+///
+/// Before the fix argv was `["sh", "-c", "'exit", "3'"]`, `sh` failed to find
+/// the program `'exit`, and the run reported exit code 2 — a wrong answer
+/// pointing nowhere near the real cause.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn shell_one_liner_reports_its_own_exit_code() {
+    let _pty = pty_lock();
+    let yaml = r#"
+name: exit-codes
+workspace:
+  temp: true
+steps:
+  - spawn:
+      command: "sh -c 'exit 3'"
+      split: posix
+  - expect_exit:
+      code: 3
+      timeout: 10s
+"#;
+    let scenario = Scenario::from_yaml(yaml).unwrap();
+    let report = run_scenario(&scenario, Path::new("."), &RunOptions::default())
+        .expect("the scenario must run to a verdict");
+    assert_eq!(
+        report.status,
+        Status::Passed,
+        "`sh -c 'exit 3'` must exit 3, not 2: {report:?}"
+    );
+}
+
+/// Under `split: posix`, an unterminated quote is a command line the harness
+/// cannot turn into a process: it must be a process error (exit 3) naming the
+/// command, never a panic and never a silent fall back to the whitespace split
+/// the author opted out of.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn unparseable_spawn_command_is_process_error() {
+    let _pty = pty_lock();
+    let yaml = r#"
+name: bad-quoting
+workspace:
+  temp: true
+steps:
+  - spawn:
+      command: "echo 'unterminated"
+      split: posix
+"#;
+    let scenario = Scenario::from_yaml(yaml).unwrap();
+    let err = run_scenario(&scenario, Path::new("."), &RunOptions::default()).unwrap_err();
+    assert_eq!(err.exit_code(), 3);
+    assert!(
+        err.message().contains("echo 'unterminated"),
+        "the error must name the offending command line: {}",
+        err.message()
+    );
+}
+
 /// A second `spawn` that fails must not cost the run its log: the first
 /// session's output and the assertion rows recorded so far are what explain
 /// the hard fault, and the hard-fault path promises they land on disk.
@@ -395,6 +634,84 @@ steps:
         log.contains("first-42"),
         "log must carry the first session's output:\n{log}"
     );
+}
+
+/// A multi-spawn run's log must substantiate every assertion it lists: each
+/// session's terminal output reaches the file, not only the last one's.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn multi_spawn_log_keeps_every_session_output() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+name: double-spawn-log
+workspace:
+  temp: true
+steps:
+  - spawn: bash
+  - send: echo first-process
+  - expect:
+      contains: first-process
+      timeout: 10s
+  - spawn: bash
+  - send: echo second-process
+  - expect:
+      contains: second-process
+      timeout: 10s
+"#;
+    let scenario = Scenario::from_yaml(yaml).unwrap();
+    let report = run_scenario(&scenario, dir.path(), &RunOptions::default()).unwrap();
+    assert_eq!(report.status, Status::Passed);
+
+    let log = std::fs::read_to_string(dir.path().join("logs/double-spawn-log.log")).unwrap();
+    assert!(
+        log.contains("first-process"),
+        "the retired session's output must survive the respawn:\n{log}"
+    );
+    assert!(
+        log.contains("second-process"),
+        "the live session's output must be logged:\n{log}"
+    );
+}
+
+/// Every matrix cell must keep its own log: the cell that failed is the one
+/// whose terminal output the author needs, and it must not be overwritten by
+/// whichever cell happens to run last.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn matrix_cells_each_write_their_own_log() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+name: matrix-log-demo
+workspace:
+  temp: true
+matrix:
+  word: [alpha, bravo, charlie]
+steps:
+  - spawn: bash
+  - send: echo ${word}
+  - expect:
+      contains: ${word}
+      timeout: 10s
+"#;
+    let scenario = Scenario::from_yaml(yaml).unwrap();
+    let report = run_matrix(&scenario, dir.path(), &RunOptions::default()).unwrap();
+    assert_eq!(report.total(), 3);
+
+    for word in ["alpha", "bravo", "charlie"] {
+        let path = dir
+            .path()
+            .join(format!("logs/matrix-log-demo.word-{word}.log"));
+        // The scenario is built in-memory, so there is no file stem to prefix;
+        // the cell coordinates alone separate the three logs.
+        let log = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cell {word} must keep its own log ({e})"));
+        assert!(
+            log.contains(word),
+            "cell {word}'s log must carry its own output:\n{log}"
+        );
+    }
 }
 
 /// The deadline form of `expect_exit` must wait for a child that exits *after*
@@ -943,6 +1260,107 @@ fn run_pitty_exit_code(args: &[&str], with_github: bool, summary: &Path) -> i32 
         .expect("pitty must exit with a code, not a signal")
 }
 
+/// Run the pitty binary once with annotations forced on, returning its captured
+/// `(stdout, stderr)`.
+///
+/// `GITHUB_ACTIONS=true` is set for the child so annotations auto-enable exactly
+/// as they do on a runner — that is the environment the stream split has to hold
+/// in. `GITHUB_STEP_SUMMARY` is pointed at `summary` so the summary write does
+/// not fall back to some ambient path.
+fn run_pitty_captured(args: &[&str], summary: &Path) -> (String, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pitty"))
+        .args(args)
+        .env("GITHUB_STEP_SUMMARY", summary)
+        .env("GITHUB_ACTIONS", "true")
+        .output()
+        .expect("pitty binary must launch");
+    (
+        String::from_utf8(out.stdout).expect("stdout must be UTF-8"),
+        String::from_utf8(out.stderr).expect("stderr must be UTF-8"),
+    )
+}
+
+/// (#39) On a runner, stdout stays a single parseable JSON document while the
+/// failure annotation still reaches GitHub.
+///
+/// `run` prints its JSON report to stdout unconditionally, and
+/// `GITHUB_ACTIONS=true` auto-enables annotations, so this is the exact
+/// combination that used to append `::error ...` after the JSON and make
+/// `pitty run | jq` fail on red runs only. What is guaranteed: stdout parses
+/// whole as JSON and carries no `::` workflow command, and the `::error`
+/// annotation appears on stderr — which the runner scans for workflow commands
+/// just as it does stdout. File-only scenario, so no PTY is needed.
+#[test]
+fn annotations_go_to_stderr_so_run_stdout_stays_parseable_json() {
+    let dir = tempfile::tempdir().unwrap();
+    // The absent file makes the single assertion fail, which is the only case
+    // that emits an annotation at all — a green run could not detect the bug.
+    let scenario = dir.path().join("s.yaml");
+    std::fs::write(
+        &scenario,
+        "name: gha-json-purity\nsteps:\n  - expect_file_exists:\n      path: absent.txt\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr) = run_pitty_captured(
+        &["run", scenario.to_str().unwrap()],
+        &dir.path().join("summary.md"),
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON value, got {stdout:?}: {e}"));
+    assert_eq!(
+        parsed["status"], "failed",
+        "the report must record the failure"
+    );
+    assert!(
+        !stdout.contains("::"),
+        "no workflow command may appear on stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("::error title=pitty%3A gha-json-purity::"),
+        "the failure annotation must still be emitted, on stderr: {stderr:?}"
+    );
+}
+
+/// (#39) The same stream split must hold for `matrix --json`, the other command
+/// whose stdout is a machine-readable document. What is guaranteed: with
+/// annotations auto-enabled, `matrix --json` stdout parses whole as JSON and the
+/// per-cell `::error` is on stderr instead. A file-only matrix keeps this
+/// PTY-free.
+#[test]
+fn matrix_json_stdout_stays_parseable_with_annotations_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("m.yaml");
+    // The axis must appear in an expansion target for `matrix_axes` to accept
+    // it, and `expect_file_exists.path` is not one; referencing it from
+    // scenario-level `env` satisfies that without needing a `spawn` (and hence
+    // without a PTY), while the assertion still fails on the absent file.
+    std::fs::write(
+        &scenario,
+        "name: gha-matrix-json\nenv:\n  TARGET: ${target}\nmatrix:\n  \
+         target: [absent.txt]\nsteps:\n  - expect_file_exists:\n      path: absent.txt\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr) = run_pitty_captured(
+        &["matrix", scenario.to_str().unwrap(), "--json"],
+        &dir.path().join("summary.md"),
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON value, got {stdout:?}: {e}"));
+    assert_eq!(parsed["cells"].as_array().map(Vec::len), Some(1));
+    assert!(
+        !stdout.contains("::"),
+        "no workflow command may appear on --json stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("::error title=pitty matrix%3A"),
+        "the per-cell annotation must still be emitted, on stderr: {stderr:?}"
+    );
+}
+
 /// (G-7) The GitHub output is a pure side effect: emitting it must not change
 /// the process exit code. For a `run` of a file-only scenario whose single
 /// assertion FAILS (an absent file), the verdict is the assertion class (1) with
@@ -1023,5 +1441,1010 @@ steps:
     assert_eq!(
         on, off,
         "--github must not change the matrix exit code (side effect only)"
+    );
+}
+
+/// Run the pitty binary once against `args`, ignoring its verdict.
+///
+/// Used by the multi-process log tests below, where what matters is the state
+/// `logs/` is left in after several *separate* invocations, not each exit code.
+fn run_pitty_ignoring_verdict(args: &[&str]) {
+    std::process::Command::new(env!("CARGO_BIN_EXE_pitty"))
+        .args(args)
+        .env_remove("GITHUB_ACTIONS")
+        .output()
+        .expect("pitty binary must launch");
+}
+
+/// The log file names under `dir/logs`, sorted.
+fn log_file_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir.join("logs"))
+        .expect("logs/ must exist")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        // Claim sidecars are an implementation detail of ownership, not logs.
+        .filter(|n| !n.ends_with(".claim"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Re-running one scenario must reuse its own log file, not accumulate a
+/// numbered copy per invocation.
+///
+/// This has to run the real binary several times: each `pitty run` is a separate
+/// process, so any in-process bookkeeping starts empty every time and cannot be
+/// what makes the re-run reuse its file. An in-process unit test passes whether
+/// or not that holds, which is exactly how this regressed.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn rerunning_a_scenario_reuses_its_log_across_processes() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("s.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: s
+steps:
+  - spawn: "echo hello-from-s"
+  - expect:
+      contains: hello-from-s
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+    let path = scenario.to_str().unwrap();
+
+    for _ in 0..3 {
+        run_pitty_ignoring_verdict(&["run", path]);
+    }
+
+    assert_eq!(
+        log_file_names(dir.path()),
+        vec!["s.log"],
+        "three runs of one scenario must share one log file"
+    );
+    // The surviving log must be the newest run's, not a stale first one left
+    // behind while later runs went to suffixed names.
+    let log = std::fs::read_to_string(dir.path().join("logs/s.log")).unwrap();
+    assert!(log.contains("hello-from-s"), "log:\n{log}");
+}
+
+/// Two scenario files sharing a `name:` must keep separate logs even when the
+/// directory is run repeatedly — the re-run reuses each file rather than either
+/// overwriting the other or spawning a numbered copy per invocation.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn duplicate_names_keep_separate_logs_across_repeated_runs() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    for (file, marker) in [("a.yaml", "AAA-from-file-a"), ("b.yaml", "BBB-from-file-b")] {
+        std::fs::write(
+            dir.path().join(file),
+            format!(
+                r#"
+name: same-name
+steps:
+  - spawn: "echo {marker}"
+  - expect:
+      contains: {marker}
+      timeout: 10s
+"#
+            ),
+        )
+        .unwrap();
+    }
+    let path = dir.path().to_str().unwrap();
+
+    run_pitty_ignoring_verdict(&["run", path]);
+    run_pitty_ignoring_verdict(&["run", path]);
+
+    assert_eq!(
+        log_file_names(dir.path()),
+        vec!["a.same-name.log", "b.same-name.log"],
+        "each file keeps one log, and a re-run reuses it"
+    );
+    let from_a = std::fs::read_to_string(dir.path().join("logs/a.same-name.log")).unwrap();
+    let from_b = std::fs::read_to_string(dir.path().join("logs/b.same-name.log")).unwrap();
+    assert!(from_a.contains("AAA-from-file-a"), "{from_a}");
+    assert!(from_b.contains("BBB-from-file-b"), "{from_b}");
+}
+
+/// Re-running a matrix must keep exactly one log per cell across invocations.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn rerunning_a_matrix_keeps_one_log_per_cell_across_processes() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("m.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: m
+matrix:
+  word: [alpha, bravo]
+steps:
+  - spawn: "echo ${word}"
+  - expect:
+      contains: "${word}"
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+    let path = scenario.to_str().unwrap();
+
+    run_pitty_ignoring_verdict(&["matrix", path]);
+    run_pitty_ignoring_verdict(&["matrix", path]);
+
+    assert_eq!(
+        log_file_names(dir.path()),
+        vec!["m.word-alpha.log", "m.word-bravo.log"],
+        "each cell keeps one log, and a re-run reuses it"
+    );
+}
+
+/// A log written by an older pitty carries no ownership claim, so it must be
+/// left alone rather than overwritten by a scenario that happens to share its
+/// name — the claim is proof of ownership, and its absence is not.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn an_unclaimed_legacy_log_is_not_overwritten() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("s.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: s
+steps:
+  - spawn: "echo hello-from-s"
+  - expect:
+      contains: hello-from-s
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+    std::fs::write(
+        dir.path().join("logs/s.log"),
+        "# scenario: s\n# status: Passed\nLEGACY-LOG-CONTENT\n",
+    )
+    .unwrap();
+
+    run_pitty_ignoring_verdict(&["run", scenario.to_str().unwrap()]);
+
+    let legacy = std::fs::read_to_string(dir.path().join("logs/s.log")).unwrap();
+    assert!(
+        legacy.contains("LEGACY-LOG-CONTENT"),
+        "an unclaimed log must be preserved, not clobbered:\n{legacy}"
+    );
+    assert!(
+        dir.path().join("logs/s.2.log").exists(),
+        "the new run must write alongside it"
+    );
+}
+
+/// `pitty run` and `pitty bench` on the same file must claim the same log.
+///
+/// They build their run options separately, so it is easy for one to stamp the
+/// scenario file into the log identity and the other not to. That divergence is
+/// invisible in a single command's output — it only shows up as two log files
+/// for one scenario, where `logs/<scenario>.log` is whichever command ran last.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn run_and_bench_share_one_log_for_the_same_scenario() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("s.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: s
+steps:
+  - spawn: "echo hello-from-s"
+  - expect:
+      contains: hello-from-s
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+    let path = scenario.to_str().unwrap();
+
+    run_pitty_ignoring_verdict(&["run", path]);
+    run_pitty_ignoring_verdict(&["bench", path, "--runs", "2"]);
+    run_pitty_ignoring_verdict(&["run", path]);
+
+    assert_eq!(
+        log_file_names(dir.path()),
+        vec!["s.log"],
+        "run and bench must write the same scenario's log to one file"
+    );
+}
+
+/// `a.yaml` and `a.yml` in one directory are two separate scenarios, so a
+/// directory run must leave two logs even when both declare the same `name:`.
+///
+/// The stem alone conflates them, which is the #36 failure mode reached through
+/// a different pair of filenames.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn yaml_and_yml_siblings_keep_separate_logs() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    for (file, marker) in [("a.yaml", "AAA-yaml"), ("a.yml", "BBB-yml")] {
+        std::fs::write(
+            dir.path().join(file),
+            format!(
+                r#"
+name: same
+steps:
+  - spawn: "echo {marker}"
+  - expect:
+      contains: {marker}
+      timeout: 10s
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    run_pitty_ignoring_verdict(&["run", dir.path().to_str().unwrap()]);
+
+    let names = log_file_names(dir.path());
+    assert_eq!(
+        names.len(),
+        2,
+        "a.yaml and a.yml must each keep a log, got {names:?}"
+    );
+    // The .yaml file keeps the plain name; the .yml one is the marked variant.
+    let plain = std::fs::read_to_string(dir.path().join("logs/a.same.log"))
+        .expect("the .yaml scenario keeps the unmarked log name");
+    assert!(
+        plain.contains("AAA-yaml"),
+        "the .yaml run's own output must survive:\n{plain}"
+    );
+}
+
+/// A matrix axis value long enough to push the log name past the filesystem's
+/// limit must still produce a log, not silently lose it.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_long_axis_value_still_writes_its_cell_log() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let long_value = "x".repeat(250);
+    std::fs::write(
+        dir.path().join("m.yaml"),
+        format!(
+            r#"
+name: m
+matrix:
+  word: ["{long_value}"]
+steps:
+  - spawn: "echo ${{word}}"
+  - expect:
+      contains: xxx
+      timeout: 10s
+"#
+        ),
+    )
+    .unwrap();
+
+    run_pitty_ignoring_verdict(&["matrix", dir.path().join("m.yaml").to_str().unwrap()]);
+
+    let names = log_file_names(dir.path());
+    assert_eq!(
+        names.len(),
+        1,
+        "the cell must leave exactly one log, got {names:?}"
+    );
+    assert!(
+        names[0].len() <= 255,
+        "the log name must fit a path component, got {} bytes",
+        names[0].len()
+    );
+}
+
+/// A log that cannot be written must be reported on stderr, leave stdout's JSON
+/// report intact, and not change the scenario's verdict.
+///
+/// The diagnostics sink failing is an environment problem, not a failure of the
+/// program under test — but it must not be invisible either.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn an_unwritable_log_warns_without_failing_the_run() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("s.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: s
+steps:
+  - spawn: "echo hello"
+  - expect:
+      contains: hello
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+    // Occupy `logs` with a regular file so the log directory cannot be created.
+    // Why not a read-only directory: a test run as root would still be able to
+    // write into one, making the test silently vacuous there.
+    std::fs::write(dir.path().join("logs"), b"not a directory").unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pitty"))
+        .args(["run", scenario.to_str().unwrap()])
+        .env_remove("GITHUB_ACTIONS")
+        .output()
+        .expect("pitty binary must launch");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a diagnostics-sink failure must not turn a passing scenario red"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"status\": \"passed\""),
+        "stdout must stay a clean JSON report:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("warning"),
+        "the warning must not pollute stdout (--json consumers parse it):\n{stdout}"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("could not write the log"),
+        "the failure must be surfaced on stderr, not swallowed:\n{stderr}"
+    );
+}
+
+/// A secret that collides with the claim line must not cost a re-run its log.
+///
+/// The claim is how a later *process* recognizes its own log. Masking is blind
+/// substring replacement, so a secret of `id` rewrote the literal key `# id:` to
+/// `# ***:` and every invocation then created a new numbered file. This must run
+/// the real binary several times: an in-process test shares the path memo and
+/// passes whether or not the on-disk claim survived, which is exactly how this
+/// defect reached production.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_secret_colliding_with_the_claim_key_does_not_accumulate_logs() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("s.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: s
+variables:
+  tok:
+    value: id
+    secret: true
+steps:
+  - spawn: "echo hello"
+  - expect:
+      contains: hello
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+    let path = scenario.to_str().unwrap();
+
+    for _ in 0..3 {
+        run_pitty_ignoring_verdict(&["run", path]);
+    }
+
+    assert_eq!(
+        log_file_names(dir.path()),
+        vec!["s.log"],
+        "a secret matching the claim key must not break cross-process reuse"
+    );
+    // The key itself is masked on the way out — a secret of `id` rewrites
+    // `# id: ` to `# ***: ` — and the reader masks the key it searches for, so
+    // both sides agree. What matters is that a claim line is present and the
+    // reuse above held; the literal spelling of the key is not the contract.
+    // Ownership lives in an unmasked sidecar beside the log, not in the body:
+    // masking would corrupt any tag written into the body.
+    assert!(
+        dir.path().join("logs/.s.log.claim").exists(),
+        "the log's ownership sidecar must exist"
+    );
+}
+
+/// The same hazard reached through the digest rather than the key: a secret
+/// equal to a hex substring that actually appears in the log's own claim.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_secret_colliding_with_the_claim_digest_does_not_accumulate_logs() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("s.yaml");
+    let body = |secret: &str| {
+        format!(
+            r#"
+name: s
+variables:
+  tok:
+    value: "{secret}"
+    secret: true
+steps:
+  - spawn: "echo hello"
+  - expect:
+      contains: hello
+      timeout: 10s
+"#
+        )
+    };
+
+    // First run with a harmless secret, purely to learn this identity's digest.
+    std::fs::write(&scenario, body("zzzz")).unwrap();
+    run_pitty_ignoring_verdict(&["run", scenario.to_str().unwrap()]);
+    let digest = std::fs::read_to_string(dir.path().join("logs/.s.log.claim"))
+        .expect("the log must carry a claim sidecar")
+        .trim()
+        .to_string();
+
+    // Now make a real hex substring of that digest the secret, and start clean.
+    std::fs::remove_dir_all(dir.path().join("logs")).unwrap();
+    std::fs::write(&scenario, body(&digest[..4])).unwrap();
+    for _ in 0..3 {
+        run_pitty_ignoring_verdict(&["run", scenario.to_str().unwrap()]);
+    }
+
+    assert_eq!(
+        log_file_names(dir.path()),
+        vec!["s.log"],
+        "a secret matching part of the digest must not break cross-process reuse"
+    );
+}
+
+/// A log must never be group/other-readable, including one an earlier pitty
+/// left at 0644 that a later run reuses.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_reused_log_is_restored_to_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("s.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: s
+steps:
+  - spawn: "echo hello"
+  - expect:
+      contains: hello
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+    let path = scenario.to_str().unwrap();
+
+    run_pitty_ignoring_verdict(&["run", path]);
+    let log = dir.path().join("logs/s.log");
+    // Simulate the log a pre-fix pitty left behind.
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    run_pitty_ignoring_verdict(&["run", path]);
+
+    let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "a reused log must be repaired to 0600");
+}
+
+/// A symlink planted at a log's name must never be written through, even when
+/// its target does not exist yet.
+///
+/// `Path::exists()` follows links, so a dangling link read as "free" and the
+/// writer created the link's target — putting the full terminal output wherever
+/// the link pointed, outside the workspace entirely.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_planted_dangling_symlink_cannot_redirect_a_log() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let victim_dir = dir.path().join("victim");
+    std::fs::create_dir_all(ws.join("logs")).unwrap();
+    std::fs::create_dir_all(&victim_dir).unwrap();
+    std::fs::write(
+        ws.join("s.yaml"),
+        r#"
+name: s
+steps:
+  - spawn: "echo sensitive-output"
+  - expect:
+      contains: sensitive-output
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+
+    let victim = victim_dir.join("pwned.txt");
+    std::os::unix::fs::symlink("../../victim/pwned.txt", ws.join("logs/s.log")).unwrap();
+
+    run_pitty_ignoring_verdict(&["run", ws.join("s.yaml").to_str().unwrap()]);
+
+    assert!(
+        !victim.exists(),
+        "the log must not be written through a dangling symlink"
+    );
+    assert_eq!(
+        std::fs::read_dir(&victim_dir).unwrap().count(),
+        0,
+        "nothing may be created outside the workspace"
+    );
+}
+
+/// A `logs/` symlink must be refused even when pitty is invoked with a bare
+/// relative filename from inside the scenario's own directory.
+///
+/// This is the shape that actually escaped: `Path::new("s.yaml").parent()` is
+/// `Some("")`, so `base_dir` arrived empty, the pre-spawn anchor could not be
+/// opened, and the writer silently fell back to a path-based write that followed
+/// the link. The sibling test below passes an *absolute* path, which captures an
+/// anchor successfully and therefore never reached that branch — which is why it
+/// certified a refusal that was not happening.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_symlinked_logs_directory_is_refused_for_a_bare_relative_path() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(
+        ws.join("s.yaml"),
+        r#"
+name: s
+steps:
+  - spawn: "echo sensitive-output"
+  - expect:
+      contains: sensitive-output
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("../elsewhere", ws.join("logs")).unwrap();
+
+    // Bare filename, resolved against the child's cwd — the CI-shaped invocation.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pitty"))
+        .args(["run", "s.yaml"])
+        .current_dir(&ws)
+        .env_remove("GITHUB_ACTIONS")
+        .output()
+        .expect("pitty binary must launch");
+
+    assert_eq!(
+        std::fs::read_dir(&elsewhere).unwrap().count(),
+        0,
+        "the log must not be written through the linked directory"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("symlink"),
+        "the refusal must be reported, not silent:\n{stderr}"
+    );
+}
+
+/// A bare relative path with no symlink must still log normally — the empty-base
+/// normalization must not cost the ordinary invocation its log.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_bare_relative_path_still_writes_its_log() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("s.yaml"),
+        r#"
+name: s
+steps:
+  - spawn: "echo hello"
+  - expect:
+      contains: hello
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pitty"))
+        .args(["run", "s.yaml"])
+        .current_dir(dir.path())
+        .env_remove("GITHUB_ACTIONS")
+        .output()
+        .expect("pitty binary must launch");
+
+    assert!(
+        String::from_utf8_lossy(&out.stderr).is_empty(),
+        "an ordinary run must not warn: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = std::fs::read_to_string(dir.path().join("logs/s.log"))
+        .expect("a bare relative invocation must still leave a log");
+    assert!(log.contains("hello"), "log:\n{log}");
+}
+
+/// A `logs/` that is itself a symlink must be refused, not followed.
+///
+/// NOTE: this passes an *absolute* path, so the anchor is captured and only the
+/// post-capture refusal is exercised. The bare-relative test above covers the
+/// branch this one structurally cannot reach.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_symlinked_logs_directory_is_refused_end_to_end() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(
+        ws.join("s.yaml"),
+        r#"
+name: s
+steps:
+  - spawn: "echo sensitive-output"
+  - expect:
+      contains: sensitive-output
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&elsewhere, ws.join("logs")).unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pitty"))
+        .args(["run", ws.join("s.yaml").to_str().unwrap()])
+        .env_remove("GITHUB_ACTIONS")
+        .output()
+        .expect("pitty binary must launch");
+
+    assert_eq!(
+        std::fs::read_dir(&elsewhere).unwrap().count(),
+        0,
+        "nothing may be written through the linked directory"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("symlink"), "stderr:\n{stderr}");
+}
+
+/// A secret equal to the log's own claim digest must not reach disk, and the
+/// re-run must still find its own log.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_secret_equal_to_the_digest_neither_leaks_nor_breaks_reuse() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("s.yaml");
+    let body = |vars: &str| {
+        format!(
+            r#"
+name: s
+{vars}
+steps:
+  - spawn: "echo hello"
+  - expect:
+      contains: hello
+      timeout: 10s
+"#
+        )
+    };
+
+    // Learn the tag this identity writes with no secrets registered.
+    std::fs::write(&scenario, body("")).unwrap();
+    run_pitty_ignoring_verdict(&["run", scenario.to_str().unwrap()]);
+    let digest = std::fs::read_to_string(dir.path().join("logs/.s.log.claim"))
+        .expect("the log must carry a claim sidecar")
+        .trim()
+        .to_string();
+
+    // Register exactly that tag as a secret and start clean.
+    std::fs::remove_dir_all(dir.path().join("logs")).unwrap();
+    let vars = format!("variables:\n  tok:\n    value: \"{digest}\"\n    secret: true");
+    std::fs::write(&scenario, body(&vars)).unwrap();
+    for _ in 0..3 {
+        run_pitty_ignoring_verdict(&["run", scenario.to_str().unwrap()]);
+    }
+
+    assert_eq!(
+        log_file_names(dir.path()),
+        vec!["s.log"],
+        "reuse must still hold when the secret equals the old digest"
+    );
+    let log = std::fs::read_to_string(dir.path().join("logs/s.log")).unwrap();
+    assert!(
+        !log.contains(&digest),
+        "the registered secret must not appear in the log:\n{log}"
+    );
+}
+
+/// A secret used as a matrix axis value must not appear in any log filename,
+/// while cells differing only inside a secret still get separate logs.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_secret_matrix_axis_value_stays_out_of_log_filenames() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("m.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: m
+variables:
+  a:
+    value: alpha
+    secret: true
+  b:
+    value: bravo
+    secret: true
+matrix:
+  word: [alpha, bravo]
+steps:
+  - spawn: "echo ${word}"
+  - expect:
+      contains: a
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+
+    run_pitty_ignoring_verdict(&["matrix", scenario.to_str().unwrap()]);
+
+    let names = log_file_names(dir.path());
+    assert_eq!(
+        names.len(),
+        2,
+        "cells differing only inside a secret must not collide: {names:?}"
+    );
+    for name in &names {
+        assert!(
+            !name.contains("alpha") && !name.contains("bravo"),
+            "a secret must not reach a log filename: {name}"
+        );
+    }
+}
+
+/// A run that ends in a hard fault must be logged as errored, never as passed.
+///
+/// The log used to be assembled before teardown, so a scenario whose spawn could
+/// not even be parsed produced `# status: Passed` — a diagnostic that actively
+/// misleads whoever opens it during an incident.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_failed_run_is_not_logged_as_passed() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("q.yaml");
+    // An unterminated quote under `split: posix`: tokenization fails, so this is
+    // a process fault. The opt-in is required — under the default whitespace
+    // rule the same line tokenizes fine and the run would not fault at all.
+    std::fs::write(
+        &scenario,
+        "name: q\nsteps:\n  - spawn:\n      command: \"echo 'unterminated\"\n      split: posix\n",
+    )
+    .unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pitty"))
+        .args(["run", scenario.to_str().unwrap()])
+        .env_remove("GITHUB_ACTIONS")
+        .output()
+        .expect("pitty binary must launch");
+
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a spawn fault is the process class"
+    );
+
+    let log = std::fs::read_to_string(dir.path().join("logs/q.log"))
+        .expect("a faulting run must still leave a log");
+    assert!(
+        !log.contains("# status: Passed"),
+        "a failed run must not be logged as passed:\n{log}"
+    );
+    assert!(log.contains("# status: Errored"), "log:\n{log}");
+    assert!(
+        log.contains("# error:"),
+        "the fault must be recorded:\n{log}"
+    );
+}
+
+/// A one-character secret that collides with the ownership tag must not cause
+/// logs to accumulate across processes.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_one_character_secret_does_not_reintroduce_log_accumulation() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("claimed.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: claimed
+variables:
+  t:
+    value: "2"
+    secret: true
+steps:
+  - spawn: "echo hello"
+  - expect:
+      contains: hello
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+    let path = scenario.to_str().unwrap();
+
+    for _ in 0..3 {
+        run_pitty_ignoring_verdict(&["run", path]);
+    }
+
+    assert_eq!(
+        log_file_names(dir.path()),
+        vec!["claimed.log"],
+        "a one-character secret must not break cross-process reuse"
+    );
+}
+
+/// A failed second `spawn` must not make the first session appear twice.
+///
+/// The retirement path saved the old session's buffer and, because the session
+/// stayed in `state` when the new spawn failed, the final teardown saved the very
+/// same buffer again — so the log showed one session twice.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn a_failed_respawn_does_not_duplicate_the_first_session() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = dir.path().join("r.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: r
+steps:
+  - spawn: bash
+  - send: echo unique-marker-42
+  - expect:
+      contains: unique-marker-42
+      timeout: 10s
+  - spawn: "   "
+"#,
+    )
+    .unwrap();
+
+    run_pitty_ignoring_verdict(&["run", scenario.to_str().unwrap()]);
+
+    let log = std::fs::read_to_string(dir.path().join("logs/r.log"))
+        .expect("a failed respawn must still leave a log");
+    let sessions = log.matches("--- session ").count();
+    assert!(
+        sessions <= 1,
+        "the retired session must appear exactly once, found {sessions} session banners:\n{log}"
+    );
+    // The marker is echoed by the shell and printed by it, so it legitimately
+    // appears more than once *within* one session; what must not happen is the
+    // whole buffer being repeated under a second banner.
+    assert!(log.contains("unique-marker-42"), "log:\n{log}");
+}
+
+/// `duration_ms` measures the scenario's own execution, never its teardown.
+///
+/// Moving teardown before the log write (so the log records the true final
+/// status) silently folded cleanup into this field, and `BenchReport` derives
+/// its statistics straight from it — so every recorded threshold would shift.
+/// COMPATIBILITY.md treats a change in a report field's meaning as a major
+/// change.
+///
+/// The assertion is on a scenario whose child has *already exited* before the
+/// run ends, so the scenario's own work is trivially small and teardown is the
+/// only thing that can inflate the number.
+///
+/// What the numbers are, measured on this build rather than assumed. Honest
+/// runs report 4-10ms. With the clock moved past teardown (verified by actually
+/// mutating `runner.rs` to read it after `shutdown()`), the same scenario
+/// reports 64-73ms. Teardown is therefore a roughly 60ms ADDITIVE cost, not a
+/// proportional one.
+///
+/// Why the bound is relative to each run's own wall-clock rather than a fixed
+/// millisecond budget. `best < 40` was correctly calibrated against those
+/// numbers but still failed CI at 40ms, because a loaded shared runner stretches
+/// the honest value toward the teardown-counted one and the gap between them is
+/// only ~55ms. An absolute bound has to be wider than the machine's noise and
+/// narrower than that gap, and on a busy runner no such number exists.
+///
+/// So each run is paired with an independently measured wall-clock spanning the
+/// whole child process — startup, scenario, teardown, exit — and the claim is
+/// that `duration_ms` is a small FRACTION of it. Scheduling noise inflates the
+/// total at least as much as it inflates `duration_ms`, so the fraction stays
+/// low on a slow machine, whereas counting teardown raises it sharply: honest
+/// runs sit near 0.1 of the total, teardown-counted ones near 0.7.
+///
+/// An earlier attempt compared the two halves of the total directly, asserting
+/// `total - duration_ms > duration_ms`. That is the same claim only when
+/// `duration_ms` is under half the total, and it failed on Windows for a
+/// structural reason rather than noise: an honest ConPTY sample of
+/// `(2079ms, 2115ms)` — a slow run, but one where `duration_ms` is 98% of the
+/// total because startup dominated — scored -2043. Reading the fraction against
+/// a threshold rather than against its own complement avoids that.
+#[test]
+#[ignore = "requires a usable PTY"]
+fn duration_ms_excludes_session_teardown() {
+    let _pty = pty_lock();
+    let dir = tempfile::tempdir().unwrap();
+
+    // The child has exited by the time the run ends, so the scenario's own work
+    // is trivially small — but pitty still tears the session down afterwards.
+    let scenario = dir.path().join("exited.yaml");
+    std::fs::write(
+        &scenario,
+        r#"
+name: exited
+steps:
+  - spawn: "echo up-42"
+  - expect:
+      contains: up-42
+      timeout: 10s
+"#,
+    )
+    .unwrap();
+
+    // Each sample pairs the reported `duration_ms` with an independently
+    // measured wall-clock of the entire child process, which teardown cannot be
+    // excluded from. That total is the yardstick.
+    let samples: Vec<(u64, u128)> = (0..5)
+        .map(|_| {
+            let started = std::time::Instant::now();
+            let out = std::process::Command::new(env!("CARGO_BIN_EXE_pitty"))
+                .args(["run", scenario.to_str().unwrap()])
+                .env_remove("GITHUB_ACTIONS")
+                .output()
+                .expect("pitty binary must launch");
+            let total_ms = started.elapsed().as_millis().max(1);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let report: serde_json::Value =
+                serde_json::from_str(&stdout).expect("stdout must be a JSON report");
+            let duration_ms = report["duration_ms"].as_u64().expect("duration_ms");
+            (duration_ms, total_ms)
+        })
+        .collect();
+
+    // The fraction of each run that `duration_ms` claims, in percent to keep the
+    // arithmetic integral.
+    let mut claimed_pct: Vec<u128> = samples
+        .iter()
+        .map(|&(duration_ms, total_ms)| u128::from(duration_ms) * 100 / total_ms)
+        .collect();
+
+    // The MEDIAN, and emphatically not the minimum.
+    //
+    // The original test took `min` of raw milliseconds, where the floor genuinely
+    // carried the signal. Once the quantity is a FRACTION of each run's own
+    // total, the minimum becomes the wrong end: the first run pays the OS's
+    // cold-start cost for the binary, which lands in the total while leaving
+    // `duration_ms` untouched, so that one sample reports an artificially low
+    // fraction. Verified against production mutated to count teardown — the
+    // samples were 18%, 69%, 69%, 69%, 69%, and a `min` rule read the 18% and
+    // passed. The median needs most of the runs to agree, which no single
+    // cold-start or descheduled sample can buy.
+    claimed_pct.sort_unstable();
+    let claimed_pct_median = claimed_pct[claimed_pct.len() / 2];
+
+    // Honest runs sit near 10% of the total; teardown-counted ones near 70%.
+    // 40% is the midpoint of that gap in the units the comparison is made in.
+    assert!(
+        claimed_pct_median < 40,
+        "duration_ms must exclude session teardown: across repeated runs it claimed a \
+         median {claimed_pct_median}% of the run's own wall-clock, where honest runs claim \
+         about 10% and runs that count teardown claim about 70%. Samples (duration_ms, \
+         total_ms): {samples:?}"
     );
 }
