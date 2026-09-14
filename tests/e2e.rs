@@ -2348,34 +2348,33 @@ steps:
 /// run ends, so the scenario's own work is trivially small and teardown is the
 /// only thing that can inflate the number.
 ///
-/// The claim is deliberately *relative*, not an absolute millisecond budget.
-/// Each run is wrapped in an independently measured wall-clock spanning the
-/// whole child process — startup, the scenario, teardown, exit — and the
-/// comparison is between the two halves of that total: the part `duration_ms`
-/// claims, and the part left over outside it.
+/// What the numbers are, measured on this build rather than assumed. Honest
+/// runs report 4-10ms. With the clock moved past teardown (verified by actually
+/// mutating `runner.rs` to read it after `shutdown()`), the same scenario
+/// reports 64-73ms. Teardown is therefore a roughly 60ms ADDITIVE cost, not a
+/// proportional one.
 ///
-/// Why not a fixed bound. The previous `best < 40` failed on CI, and widening it
-/// would have been the wrong fix: the honest value under this harness is really
-/// ~38-44ms (the `~8ms` in the old comment was measured under different
-/// conditions, so the threshold was calibrated against a number this test never
-/// produces and sat directly on the honest value). Any absolute budget also has
-/// to survive a loaded shared runner adding tens of milliseconds of scheduling
-/// noise to a small measurement, which no single millisecond number does.
+/// Why the bound is relative to each run's own wall-clock rather than a fixed
+/// millisecond budget. `best < 40` was correctly calibrated against those
+/// numbers but still failed CI at 40ms, because a loaded shared runner stretches
+/// the honest value toward the teardown-counted one and the gap between them is
+/// only ~55ms. An absolute bound has to be wider than the machine's noise and
+/// narrower than that gap, and on a busy runner no such number exists.
 ///
-/// What separates the hypotheses regardless of machine speed is *where the
-/// teardown cost lands*. Teardown is a fixed grace period of roughly 55ms; it is
-/// inside the measured total either way, so the leftover `total - duration_ms`
-/// is large when `duration_ms` honestly excludes teardown and collapses when it
-/// does not. Measured here across repeated runs:
+/// So each run is paired with an independently measured wall-clock spanning the
+/// whole child process — startup, scenario, teardown, exit — and the claim is
+/// that `duration_ms` is a small FRACTION of it. Scheduling noise inflates the
+/// total at least as much as it inflates `duration_ms`, so the fraction stays
+/// low on a slow machine, whereas counting teardown raises it sharply: honest
+/// runs sit near 0.1 of the total, teardown-counted ones near 0.7.
 ///
-/// | | `duration_ms` | `total - duration_ms` |
-/// |---|---|---|
-/// | honest | 37-44ms | ~93ms |
-/// | teardown counted | 89-98ms | ~38ms |
-///
-/// So the test asserts the leftover exceeds what `duration_ms` claims. A slower
-/// machine stretches both sides together, which is what makes the comparison
-/// hold where an absolute bound did not.
+/// An earlier attempt compared the two halves of the total directly, asserting
+/// `total - duration_ms > duration_ms`. That is the same claim only when
+/// `duration_ms` is under half the total, and it failed on Windows for a
+/// structural reason rather than noise: an honest ConPTY sample of
+/// `(2079ms, 2115ms)` — a slow run, but one where `duration_ms` is 98% of the
+/// total because startup dominated — scored -2043. Reading the fraction against
+/// a threshold rather than against its own complement avoids that.
 #[test]
 #[ignore = "requires a usable PTY"]
 fn duration_ms_excludes_session_teardown() {
@@ -2398,10 +2397,9 @@ steps:
     )
     .unwrap();
 
-    // Each sample pairs the reported `duration_ms` with the wall-clock of the
-    // entire child process, measured out here where teardown cannot be excluded
-    // from it. That independent total is the yardstick the comparison below is
-    // made against.
+    // Each sample pairs the reported `duration_ms` with an independently
+    // measured wall-clock of the entire child process, which teardown cannot be
+    // excluded from. That total is the yardstick.
     let samples: Vec<(u64, u128)> = (0..5)
         .map(|_| {
             let started = std::time::Instant::now();
@@ -2410,8 +2408,6 @@ steps:
                 .env_remove("GITHUB_ACTIONS")
                 .output()
                 .expect("pitty binary must launch");
-            // Includes startup, the scenario, teardown and exit — a strict
-            // superset of whatever `duration_ms` measures.
             let total_ms = started.elapsed().as_millis().max(1);
             let stdout = String::from_utf8_lossy(&out.stdout);
             let report: serde_json::Value =
@@ -2421,38 +2417,34 @@ steps:
         })
         .collect();
 
-    // For each sample, how much more time fell *outside* `duration_ms` than
-    // inside it. Positive means the bulk of the run — teardown included — is not
-    // being charged to the scenario, which is the property under test.
-    let mut margins: Vec<i128> = samples
+    // The fraction of each run that `duration_ms` claims, in percent to keep the
+    // arithmetic integral.
+    let mut claimed_pct: Vec<u128> = samples
         .iter()
-        .map(|&(duration_ms, total_ms)| {
-            let outside_duration = total_ms.saturating_sub(u128::from(duration_ms));
-            outside_duration as i128 - i128::from(duration_ms)
-        })
+        .map(|&(duration_ms, total_ms)| u128::from(duration_ms) * 100 / total_ms)
         .collect();
 
-    // The MEDIAN, deliberately: neither the best nor the worst sample.
+    // The MEDIAN, and emphatically not the minimum.
     //
-    // Not the best — the first run pays the OS's cold-start cost for the binary,
-    // which lands entirely outside `duration_ms` and inflates that one sample's
-    // margin by hundreds of milliseconds. Taking the maximum would let that
-    // outlier alone satisfy the assertion and hide a real regression (it did,
-    // while this test was being written). Not the worst either, since a single
-    // descheduled run is exactly the CI noise this test must tolerate. The
-    // median needs most of the samples to agree, which no one-off spike can buy.
-    margins.sort_unstable();
-    let median_margin = margins[margins.len() / 2];
+    // The original test took `min` of raw milliseconds, where the floor genuinely
+    // carried the signal. Once the quantity is a FRACTION of each run's own
+    // total, the minimum becomes the wrong end: the first run pays the OS's
+    // cold-start cost for the binary, which lands in the total while leaving
+    // `duration_ms` untouched, so that one sample reports an artificially low
+    // fraction. Verified against production mutated to count teardown — the
+    // samples were 18%, 69%, 69%, 69%, 69%, and a `min` rule read the 18% and
+    // passed. The median needs most of the runs to agree, which no single
+    // cold-start or descheduled sample can buy.
+    claimed_pct.sort_unstable();
+    let claimed_pct_median = claimed_pct[claimed_pct.len() / 2];
 
-    // Honest runs clear this by roughly +50ms; a run that counts teardown sits
-    // around -55ms. Requiring merely `> 0` puts the line in the middle of that
-    // ~100ms gap, so neither a slow machine nor a fast one can cross it by
-    // accident.
+    // Honest runs sit near 10% of the total; teardown-counted ones near 70%.
+    // 40% is the midpoint of that gap in the units the comparison is made in.
     assert!(
-        median_margin > 0,
-        "duration_ms must exclude teardown, but across repeated runs it claimed more of \
-         each run than was left outside it (median margin {median_margin}ms; honest is \
-         about +50ms, teardown-counted about -55ms). Teardown is a fixed ~55ms cost that \
-         belongs outside `duration_ms`. Samples (duration_ms, total_ms): {samples:?}"
+        claimed_pct_median < 40,
+        "duration_ms must exclude session teardown: across repeated runs it claimed a \
+         median {claimed_pct_median}% of the run's own wall-clock, where honest runs claim \
+         about 10% and runs that count teardown claim about 70%. Samples (duration_ms, \
+         total_ms): {samples:?}"
     );
 }
