@@ -31,7 +31,7 @@ check-windows:
 
 # Verify GitHub Actions SHA pins and version comments.
 pinact-verify:
-    pinact run -fix=false -verify
+    pinact run --fix=false --verify-comment
 
 # Build the flake package (what `nix profile install` produces) and smoke it.
 # Fails on a stale `cargoHash` in nix/package.nix — see CONTRIBUTING.md.

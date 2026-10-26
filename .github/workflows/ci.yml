@@ -9,8 +9,10 @@
 # in CI evaluates it.
 #
 # Action pinning: actions are pinned to immutable commit SHAs with version
-# comments. `pinact run -fix=false -verify` gates supported pins/comments, so a
-# mutable tag or stale version annotation fails CI. The sole exception is
+# comments. `pinact run --fix=false --verify-comment` gates supported
+# pins/comments, so a mutable tag or stale version annotation fails CI (pinact
+# v5 rejects the single-dash `-fix=false -verify` spelling and renamed
+# `-verify` to `--verify-comment`). The sole exception is
 # dtolnay/rust-toolchain, which has no semver tag for pinact to verify; it is
 # still manually SHA-pinned and receives `toolchain: stable` explicitly.
 #
@@ -80,7 +82,7 @@ jobs:
       - name: pinact verify
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: nix develop --command pinact run -fix=false -verify
+        run: nix develop --command pinact run --fix=false --verify-comment
       - name: cargo fmt --check
         run: nix develop --command cargo fmt --check
       - name: cargo clippy
